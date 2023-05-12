@@ -57,8 +57,9 @@ class PixelSpaceDiffusion(ComposerModel):
         self.continuous_time = continuous_time
         self.input_key = input_key
         self.conditioning_key = conditioning_key
-        if prediction_type not in ['sample', 'epsilon', 'v_prediction']:
-            raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
+        if prediction_type not in ['sample', 'epsilon', 'v_prediction', 'reflect']:
+            raise ValueError(
+                f'prediction type must be one of sample, epsilon, v_prediction, or reflect. Got {prediction_type}')
         self.prediction_type = prediction_type
         self.train_metrics = train_metrics
         self.val_metrics = val_metrics
@@ -89,6 +90,8 @@ class PixelSpaceDiffusion(ComposerModel):
             targets = inputs
         elif self.prediction_type == 'v_prediction':
             targets = self.scheduler.get_velocity(inputs, noise, timesteps)
+        elif self.prediction_type == 'reflect':
+            targets = self.scheduler.get_reflection(inputs, noise, timesteps)
         else:
             raise ValueError(
                 f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')

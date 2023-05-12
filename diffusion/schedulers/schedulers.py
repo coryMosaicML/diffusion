@@ -62,6 +62,16 @@ class ContinuousTimeScheduler:
         cos_t = torch.cos(timesteps)
         return -sin_t * inputs + cos_t * noise
 
+    def get_reflection(self, inputs, noise, timesteps):
+        # reflection is defined by the reflection of the signal about the noise axis.
+        # expand timesteps to the right number of dimensions
+        while len(timesteps.shape) < len(inputs.shape):
+            timesteps = timesteps.unsqueeze(-1)
+        # A more general implementation would first compute the angle from the timesteps
+        sin_t = torch.sin(timesteps)
+        cos_t = torch.cos(timesteps)
+        return cos_t * inputs - sin_t * noise
+
     def scale_model_input(self, model_input, t):
         # Needed to work with our generate function that uses huggingface schedulers
         return model_input
@@ -87,6 +97,8 @@ class ContinuousTimeScheduler:
             x_0 = (model_input - sin_t * model_output) / cos_t
         elif self.prediction_type == 'v_prediction':
             x_0 = cos_t * model_input - sin_t * model_output
+        elif self.prediction_type == 'reflect':
+            x_0 = 0.5 * (model_input + model_output) / cos_t
         else:
             raise ValueError(
                 f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
