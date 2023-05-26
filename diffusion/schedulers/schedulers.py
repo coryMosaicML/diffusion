@@ -93,22 +93,22 @@ class ContinuousTimeScheduler:
         # Get the predicted clean input from each of the prediction types
         if self.prediction_type == 'sample':
             x_0 = model_output
+            score_beta_dt = -(model_input - cos_phi_t * x_0) / np.square(sin_phi_t) * beta_t * dt
         elif self.prediction_type == 'epsilon':
             x_0 = (model_input - sin_phi_t * model_output) / cos_phi_t
+            score_beta_dt = -(model_input - cos_phi_t * x_0) / np.square(sin_phi_t) * beta_t * dt
         elif self.prediction_type == 'v_prediction':
-            x_0 = cos_phi_t * model_input - sin_phi_t * model_output
+            score_beta_dt = -2 * (model_output + np.tan(t) * model_input) * dt
         else:
             raise ValueError(
                 f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
-        # Compute the score function
-        score = -(model_input - cos_phi_t * x_0) / np.square(sin_phi_t)
         # Compute the previous sample x_t -> x_t-1
         if self.use_ode:
             # Use Euler's method to integrate the probability flow ODE
-            x_prev = model_input + 0.5 * (model_input + score) * beta_t * dt
+            x_prev = model_input + 0.5 * model_input * beta_t * dt + 0.5 * score_beta_dt
         else:
             # Use Euler-Maruyama to integrate the reverse SDE
-            x_prev = model_input + (0.5 * model_input + score) * beta_t * dt
+            x_prev = model_input + 0.5 * model_input * beta_t * dt + score_beta_dt
             # Add the noise term
             x_prev += np.sqrt(beta_t * dt) * torch.randn_like(model_input)
         return {'prev_sample': x_prev}

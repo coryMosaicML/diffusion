@@ -28,6 +28,8 @@ except:
 def stable_diffusion_2(
     model_name: str = 'stabilityai/stable-diffusion-2-base',
     pretrained: bool = True,
+    prediction_type: str = 'epsilon',
+    continuous_time: bool = False,
     train_metrics: Optional[List] = None,
     val_metrics: Optional[List] = None,
     val_guidance_scales: Optional[List] = None,
@@ -45,6 +47,9 @@ def stable_diffusion_2(
     Args:
         model_name (str, optional): Name of the model to load. Defaults to 'stabilityai/stable-diffusion-2-base'.
         pretrained (bool, optional): Whether to load pretrained weights. Defaults to True.
+        prediction_type (str, optional): Type of prediction to use. One of 'sample', 'epsilon', 'v_prediction'.
+            Defaults to 'epsilon'.
+        continuous_time (bool, optional): Whether to use continuous time diffusion. Defaults to False.
         train_metrics (list, optional): List of metrics to compute during training. If None, defaults to
             [MeanSquaredError()].
         val_metrics (list, optional): List of metrics to compute during validation. If None, defaults to
@@ -91,6 +96,8 @@ def stable_diffusion_2(
     model = StableDiffusion(
         unet=unet,
         vae=vae,
+        prediction_type=prediction_type,
+        continuous_time=continuous_time,
         text_encoder=text_encoder,
         tokenizer=tokenizer,
         noise_scheduler=noise_scheduler,

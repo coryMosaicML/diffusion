@@ -41,6 +41,7 @@ class StableDiffusion(ComposerModel):
             used in parts of the stable diffusion v2.1 training process.
             See https://arxiv.org/pdf/2202.00512.pdf.
             Default: `None` (uses whatever the pretrained model used)
+        continuous_time (bool): Whether to use continuous time diffusion. Default: `False`.
         train_metrics (list): List of torchmetrics to calculate during training.
             Default: `None`.
         val_metrics (list): List of torchmetrics to calculate during validation.
@@ -60,6 +61,8 @@ class StableDiffusion(ComposerModel):
             Default: `image_latents`.
         text_latents_key (str): key in batch dict for text latent.
             Default: `caption_latents`.
+        prediction_type (str): The type of prediction to use. Must be one of 'sample', 'epsilon', or 'v_prediction'.
+            Default: `epsilon`.
         precomputed_latents: whether to use precomputed latents.
             Default: `False`.
         encode_latents_in_fp16 (bool): whether to encode latents in fp16.
@@ -83,6 +86,8 @@ class StableDiffusion(ComposerModel):
                  text_key: str = 'captions',
                  image_latents_key: str = 'image_latents',
                  text_latents_key: str = 'caption_latents',
+                 prediction_type: str = 'epsilon',
+                 continuous_time: bool = False,
                  precomputed_latents: bool = False,
                  encode_latents_in_fp16: bool = False,
                  fsdp: bool = False):
@@ -95,6 +100,10 @@ class StableDiffusion(ComposerModel):
         self.image_key = image_key
         self.image_latents_key = image_latents_key
         self.precomputed_latents = precomputed_latents
+        if prediction_type not in ['sample', 'epsilon', 'v_prediction']:
+            raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
+        self.prediction_type = prediction_type
+        self.continuous_time = continuous_time
 
         # setup metrics
         if train_metrics is None:
@@ -173,14 +182,26 @@ class StableDiffusion(ComposerModel):
             # Magical scaling number (See https://github.com/huggingface/diffusers/issues/437#issuecomment-1241827515)
             latents *= 0.18215
 
-        # Sample the diffusion timesteps
-        timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
+        # Sample the diffusion timesteps, either discrete or continuous
+        if self.continuous_time:
+            timesteps = self.noise_scheduler.t_max * torch.rand(latents.shape[0], device=latents.device)
+        else:
+            timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
         # Add noise to the inputs (forward diffusion)
         noise = torch.randn_like(latents)
         noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-
+        # Generate the targets
+        if self.prediction_type == 'epsilon':
+            targets = noise
+        elif self.prediction_type == 'sample':
+            targets = latents
+        elif self.prediction_type == 'v_prediction':
+            targets = self.noise_scheduler.get_velocity(latents, noise, timesteps)
+        else:
+            raise ValueError(
+                f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
         # Forward through the model
-        return self.unet(noised_latents, timesteps, conditioning)['sample'], noise, timesteps
+        return self.unet(noised_latents, timesteps, conditioning)['sample'], targets, timesteps
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
