@@ -393,7 +393,7 @@ class StableDiffusion(ComposerModel):
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            latents = self.inference_scheduler.step(noise_pred, t, latents, generator=rng_generator).prev_sample
+            latents = self.inference_scheduler.step(noise_pred, t, latents, generator=rng_generator)['prev_sample']
 
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
