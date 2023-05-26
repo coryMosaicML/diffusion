@@ -90,8 +90,13 @@ def stable_diffusion_2(
         text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
 
     tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
-    noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
-    inference_noise_scheduler = DDIMScheduler.from_pretrained(model_name, subfolder='scheduler')
+    if continuous_time:
+        # Need to use the continuous time schedulers for training and inference.
+        noise_scheduler = ContinuousTimeScheduler(t_max=1.570795, prediction_type=prediction_type)
+        inference_noise_scheduler = ContinuousTimeScheduler(t_max=1.56, prediction_type=prediction_type)
+    else:
+        noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
+        inference_noise_scheduler = DDIMScheduler.from_pretrained(model_name, subfolder='scheduler')
 
     model = StableDiffusion(
         unet=unet,
