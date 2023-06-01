@@ -94,9 +94,6 @@ for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
         img_id = args.batch_size * batch_id + i
         to_pil_image(img).save(f'{args.gen_image_path}/{img_id}.png')
 
-    if args.batch_size * batch_id >= 512:
-        break
-
 # Compute FID
 score = fid.compute_fid(args.real_image_path, args.gen_image_path)
 print(f'FID: {score}')
