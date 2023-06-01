@@ -6,6 +6,7 @@
 import argparse
 import os
 
+import wandb
 from cleanfid import fid
 from composer import Trainer
 from composer.loggers import WandBLogger
@@ -93,7 +94,13 @@ for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
     for i, img in enumerate(generated_images):
         img_id = args.batch_size * batch_id + i
         to_pil_image(img).save(f'{args.gen_image_path}/{img_id}.png')
+    break
 
 # Compute FID
 score = fid.compute_fid(args.real_image_path, args.gen_image_path)
 print(f'FID: {score}')
+
+# Optionally log to wandb
+if args.wandb:
+    wandb.init(project=args.project, name=args.name)
+    wandb.log({'metrics/FID': score})
