@@ -97,9 +97,10 @@ for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
 
 # Compute FID
 score = fid.compute_fid(args.real_image_path, args.gen_image_path)
-print(f'FID: {score}')
+print(f'{name} FID: {score}')
 
 # Optionally log to wandb
+name += f'-{args.guidance_scale}-{args.seed}'
 if args.wandb:
-    wandb.init(project=args.project, name=args.name)
+    wandb.init(project=args.project, name=name)
     wandb.log({'metrics/FID': score})
