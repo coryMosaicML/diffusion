@@ -84,7 +84,7 @@ for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
                                       height=args.size,
                                       width=args.size,
                                       guidance_scale=args.guidance_scale,
-                                      seed=args.seed,
+                                      seed=args.seed + batch_id,
                                       progress_bar=False)
     # Save the real images
     for i, img in enumerate(real_images):
