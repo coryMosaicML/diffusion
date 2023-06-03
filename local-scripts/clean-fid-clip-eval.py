@@ -63,6 +63,9 @@ if pretrained:
     name = args.name + '-pretrained'
 else:
     name = args.name + '-checkpoint'
+name += f'-{args.guidance_scale}-{args.seed}'
+print(f'Evaluating {name}')
+
 model = stable_diffusion_2(
     model_name='stabilityai/stable-diffusion-2-base',
     val_metrics=[],
@@ -102,7 +105,6 @@ score = fid.compute_fid(args.real_image_path, args.gen_image_path)
 print(f'{name} FID: {score}')
 
 # Optionally log to wandb
-name += f'-{args.guidance_scale}-{args.seed}'
 if args.wandb:
     wandb.init(project=args.project, name=name)
     wandb.log({'metrics/FID': score})
