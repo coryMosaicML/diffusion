@@ -61,6 +61,8 @@ coco_val_dataloader = build_streaming_cocoval_dataloader(
 pretrained = args.load_path is None
 if pretrained:
     name = args.name + '-pretrained'
+else:
+    name = args.name + '-checkpoint'
 model = stable_diffusion_2(
     model_name='stabilityai/stable-diffusion-2-base',
     val_metrics=[],
