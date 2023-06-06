@@ -100,10 +100,10 @@ for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
                                       progress_bar=False)
     # Save the real images
     for i, img in enumerate(real_images):
-        to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{img_id}_rank_{dist.get_local_rank()}.png')
+        to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
     # Save the generated images
     for i, img in enumerate(generated_images):
-        to_pil_image(img).save(f'{args.gen_image_path}/{batch_id}_{img_id}_rank_{dist.get_local_rank()}.png')
+        to_pil_image(img).save(f'{args.gen_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
 
 # Need to wait until all processes have finished generating images
 dist.barrier()
