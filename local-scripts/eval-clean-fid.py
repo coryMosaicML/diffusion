@@ -112,12 +112,13 @@ dist.barrier()
 if dist.get_local_rank() == 0:
     # Standard FID
     fid = fid.compute_fid(args.real_image_path, args.gen_image_path)
-    print(f'{name} FID: {score}')
+    print(f'{name} FID: {fid}')
     # CLIP-FID from https://arxiv.org/abs/2203.06026
     clip_fid = fid.compute_fid(args.real_image_path, args.gen_image_path, mode='clean', model_name='clip_vit_b_32')
+    print(f'{name} CLIP-FID: {clip_fid}')
     # KID
     kid = fid.compute_kid(args.real_image_path, args.gen_image_path)
-
+    print(f'{name} KID: {kid}')
     # Optionally log to wandb
     if args.wandb:
         wandb.log({'metrics/FID': fid})
