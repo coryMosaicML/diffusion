@@ -108,11 +108,18 @@ for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
 # Need to wait until all processes have finished generating images
 dist.barrier()
 
-# Compute FID
+# Compute metrics
 if dist.get_local_rank() == 0:
-    score = fid.compute_fid(args.real_image_path, args.gen_image_path)
+    # Standard FID
+    fid = fid.compute_fid(args.real_image_path, args.gen_image_path)
     print(f'{name} FID: {score}')
+    # CLIP-FID from https://arxiv.org/abs/2203.06026
+    clip_fid = fid.compute_fid(args.real_image_path, args.gen_image_path, mode='clean', model_name='clip_vit_b_32')
+    # KID
+    kid = fid.compute_kid(args.real_image_path, args.gen_image_path)
 
     # Optionally log to wandb
     if args.wandb:
-        wandb.log({'metrics/FID': score})
+        wandb.log({'metrics/FID': fid})
+        wandb.log({'metrics/CLIP-FID': clip_fid})
+        wandb.log({'metrics/KID': kid})
