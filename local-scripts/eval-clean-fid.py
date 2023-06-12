@@ -15,7 +15,7 @@ from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 
 from diffusion.callbacks import LogDiffusionImages
-from diffusion.datasets import build_streaming_cocoval_dataloader
+from diffusion.datasets import build_streaming_cocoval_dataloader, build_streaming_laion_dataloader
 from diffusion.models import stable_diffusion_2
 
 parser = argparse.ArgumentParser()
@@ -37,6 +37,7 @@ parser.add_argument('--wandb', action='store_true', help='log to wandb')
 parser.add_argument('--project', default='diffusion-eval', type=str, help='wandb project to use')
 parser.add_argument('--name', default='fid-clip-evaluation', type=str, help='wandb name to use')
 parser.add_argument('--entity', default='mosaic-ml', type=str, help='wandb entity to use')
+parser.add_argument('--num_samples', default=30_000, type=int, help='number of samples to calculate FID on.')
 args = parser.parse_args()
 
 # Verify output dirs exist, if they don't, create them
@@ -46,17 +47,28 @@ if not os.path.exists(args.gen_image_path):
     os.makedirs(args.gen_image_path)
 
 # Create the eval dataloader
-coco_val_dataloader = build_streaming_cocoval_dataloader(
-    remote=args.remote,
-    local='/tmp/mds-cache/mds-coco-2014-val-fid-clip/',
-    resize_size=args.size,
-    use_crop=args.no_crop,
-    batch_size=args.batch_size,
-    prefetch_factor=2,
-    num_workers=8,
-    persistent_workers=True,
-    pin_memory=True,
-)
+if 'coco' in args.remote:
+    eval_dataloader = build_streaming_cocoval_dataloader(
+        remote=args.remote,
+        local='/tmp/mds-cache/mds-coco-2014-val-fid-clip/',
+        resize_size=args.size,
+        use_crop=args.no_crop,
+        batch_size=args.batch_size,
+        prefetch_factor=2,
+        num_workers=8,
+        persistent_workers=True,
+        pin_memory=True,
+    )
+elif 'laion' in args.remote:
+    eval_dataloader = build_streaming_laion_dataloader(
+        remote=args.remote,
+        local='/tmp/mds-cache/mds-laion/',
+        batch_size=args.batch_size,
+        resize_size=args.size,
+        predownload=30_000,
+        drop_last=False,
+        shuffle=True,
+    )
 
 # If a checkpoint is specified, evaluate it. Otherwise evaluate the pretrained SD2.0 model.
 pretrained = args.load_path is None
@@ -81,11 +93,13 @@ model = stable_diffusion_2(
 )
 
 # Load model
-trainer = Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=coco_val_dataloader)
+trainer = Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
 
 # Iterate over the coco dataloader
-num_batches = len(coco_val_dataloader)
-for batch_id, batch in tqdm(enumerate(coco_val_dataloader)):
+num_batches = len(eval_dataloader)
+for batch_id, batch in tqdm(enumerate(eval_dataloader)):
+    if batch_id >= args.num_samples:
+        break
     real_images = batch['image']
     captions = batch['captions']
     # Ensure a new seed for each batch
@@ -114,7 +128,10 @@ if dist.get_local_rank() == 0:
     fid_score = fid.compute_fid(args.real_image_path, args.gen_image_path)
     print(f'{name} FID: {fid_score}')
     # CLIP-FID from https://arxiv.org/abs/2203.06026
-    clip_fid_score = fid.compute_fid(args.real_image_path, args.gen_image_path, mode='clean', model_name='clip_vit_b_32')
+    clip_fid_score = fid.compute_fid(args.real_image_path,
+                                     args.gen_image_path,
+                                     mode='clean',
+                                     model_name='clip_vit_b_32')
     print(f'{name} CLIP-FID: {clip_fid_score}')
     # KID
     kid_score = fid.compute_kid(args.real_image_path, args.gen_image_path)
