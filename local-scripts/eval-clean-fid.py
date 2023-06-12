@@ -98,28 +98,28 @@ trainer = Trainer(model=model, load_path=args.load_path, load_weights_only=True,
 
 # Iterate over the coco dataloader
 num_batches = len(eval_dataloader)
-with get_precision_context('amp_fp16'):
-    for batch_id, batch in tqdm(enumerate(eval_dataloader)):
-        if batch_id * args.batch_size * dist.get_world_size() >= args.num_samples:
-            break
-        real_images = batch['image']
-        captions = batch['captions']
-        # Ensure a new seed for each batch
-        starting_seed = args.seed + num_batches * dist.get_local_rank()
-        seed = starting_seed + batch_id
-        # Generate images from the captions
+for batch_id, batch in tqdm(enumerate(eval_dataloader)):
+    if batch_id * args.batch_size * dist.get_world_size() >= args.num_samples:
+        break
+    real_images = batch['image']
+    captions = batch['captions']
+    # Ensure a new seed for each batch
+    starting_seed = args.seed + num_batches * dist.get_local_rank()
+    seed = starting_seed + batch_id
+    # Generate images from the captions
+    with get_precision_context('amp_fp16'):
         generated_images = model.generate(tokenized_prompts=captions,
                                         height=args.size,
                                         width=args.size,
                                         guidance_scale=args.guidance_scale,
                                         seed=seed,
                                         progress_bar=False)
-        # Save the real images
-        for i, img in enumerate(real_images):
-            to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
-        # Save the generated images
-        for i, img in enumerate(generated_images):
-            to_pil_image(img).save(f'{args.gen_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
+    # Save the real images
+    for i, img in enumerate(real_images):
+        to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
+    # Save the generated images
+    for i, img in enumerate(generated_images):
+        to_pil_image(img).save(f'{args.gen_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
 
 # Need to wait until all processes have finished generating images
 dist.barrier()
