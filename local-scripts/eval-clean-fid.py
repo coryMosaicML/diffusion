@@ -98,7 +98,7 @@ trainer = Trainer(model=model, load_path=args.load_path, load_weights_only=True,
 # Iterate over the coco dataloader
 num_batches = len(eval_dataloader)
 for batch_id, batch in tqdm(enumerate(eval_dataloader)):
-    if batch_id >= args.num_samples:
+    if batch_id * args.batch_size * dist.get_world_size() >= args.num_samples:
         break
     real_images = batch['image']
     captions = batch['captions']
