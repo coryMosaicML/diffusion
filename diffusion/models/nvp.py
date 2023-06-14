@@ -154,10 +154,10 @@ class LNVP(ComposerModel):
             latents *= 0.18215
 
         # Sample the diffusion timesteps. Floats beteween 0 and 1.
-        timesteps = torch.rand((latents.shape[0], 1, 1, 1), device=latents.device)
+        timesteps = torch.rand(latents.shape[0], device=latents.device)
         # Add noise to the inputs (forward diffusion)
         noise = torch.randn_like(latents)
-        noised_latents = (1 - timesteps) * latents + timesteps * noise
+        noised_latents = (1 - timesteps.view(-1, 1, 1, 1)) * latents + timesteps.view(-1, 1, 1, 1) * noise
         # Make the targets
         targets = noise - latents
         # Forward through the model
