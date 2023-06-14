@@ -20,7 +20,7 @@ from diffusion.datasets import build_streaming_cocoval_dataloader, build_streami
 from diffusion.models import stable_diffusion_2
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--remote', type=str, help='path to coco streaming dataset')
+parser.add_argument('--remote', type=str, help='path to coco or laion streaming dataset(s)', nargs='+')
 parser.add_argument('--load_path', default=None, type=str, help='path to load model from')
 parser.add_argument('--guidance_scale', default=1.0, type=float, help='guidance scale to evaluate at')
 parser.add_argument('--size', default=512, type=int, help='image size to evaluate at')
@@ -39,18 +39,35 @@ parser.add_argument('--project', default='diffusion-eval', type=str, help='wandb
 parser.add_argument('--name', default='fid-clip-evaluation', type=str, help='wandb name to use')
 parser.add_argument('--entity', default='mosaic-ml', type=str, help='wandb entity to use')
 parser.add_argument('--num_samples', default=30_000, type=int, help='number of samples to calculate FID on.')
+parser.add_argument('--precision', default='amp_fp16', type=str, choices=['fp32', 'amp_fp16', 'amp_bf16'])
+parser.add_argument('--prompts',
+                    default=[
+                        'a couple waiting to cross the street underneath an umbrella.',
+                        'three men walking in the rain with umbrellas.',
+                        'a man is riding a red motor cycle, with baskets.',
+                        'a clock that has animal pictures instead of numbers.',
+                        'a brightly decorated bus sits on the road.',
+                        'a horse bucking with a rider on it, completely vertical, with another horse and onlookers.',
+                        'a white and blue bus is on a city street at night.',
+                        'a large clock tower on a building by a river',
+                        'beans and other food is sitting on a plate.',
+                        'a group of people that are standing up on a tennis court',
+                    ],
+                    type=str,
+                    nargs='*',
+                    help='Prompts used to generate images for visualization in wandb')
 args = parser.parse_args()
 
 # Verify output dirs exist, if they don't, create them
-if not os.path.exists(args.real_image_path):
+if not os.path.exists(args.real_image_path) and dist.get_local_rank() == 0:
     os.makedirs(args.real_image_path)
-if not os.path.exists(args.gen_image_path):
+if not os.path.exists(args.gen_image_path) and dist.get_local_rank() == 0:
     os.makedirs(args.gen_image_path)
 
 # Create the eval dataloader
-if 'coco' in args.remote:
+if 'coco' in args.remote[0]:
     eval_dataloader = build_streaming_cocoval_dataloader(
-        remote=args.remote,
+        remote=args.remote[0],  # COCO builder can only take one remote path
         local='/tmp/mds-cache/mds-coco-2014-val-fid-clip/',
         resize_size=args.size,
         use_crop=args.no_crop,
@@ -60,12 +77,18 @@ if 'coco' in args.remote:
         persistent_workers=True,
         pin_memory=True,
     )
-elif 'laion' in args.remote:
+elif 'laion' in args.remote[0]:
+    # Define a local directory for each remote path
+    local = [f'/tmp/mds-cache/mds-laion/{i}' for i in range(len(args.remote))]
     eval_dataloader = build_streaming_laion_dataloader(
         remote=args.remote,
-        local='/tmp/mds-cache/mds-laion/',
-        batch_size=args.batch_size,
+        local=local,
         resize_size=args.size,
+        batch_size=args.batch_size,
+        prefetch_factor=2,
+        num_workers=8,
+        persistent_workers=True,
+        pin_memory=True,
         predownload=30_000,
         drop_last=False,
         shuffle=True,
@@ -82,6 +105,7 @@ print(f'Evaluating {name}')
 # Init wandb
 if args.wandb and dist.get_local_rank() == 0:
     wandb.init(name=name, project=args.project, entity=args.entity)
+    wandb_logger = WandBLogger(name=name, project=args.project, entity=args.entity)
 
 model = stable_diffusion_2(
     model_name='stabilityai/stable-diffusion-2-base',
@@ -94,26 +118,28 @@ model = stable_diffusion_2(
 )
 
 # Load model
-trainer = Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
+Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
 
-# Iterate over the coco dataloader
+# Iterate over the eval dataloader
 num_batches = len(eval_dataloader)
 for batch_id, batch in tqdm(enumerate(eval_dataloader)):
+    # Break if enough samples were generated
     if batch_id * args.batch_size * dist.get_world_size() >= args.num_samples:
         break
+
     real_images = batch['image']
     captions = batch['captions']
     # Ensure a new seed for each batch
     starting_seed = args.seed + num_batches * dist.get_local_rank()
     seed = starting_seed + batch_id
     # Generate images from the captions
-    with get_precision_context('amp_fp16'):
+    with get_precision_context(args.precision):
         generated_images = model.generate(tokenized_prompts=captions,
-                                        height=args.size,
-                                        width=args.size,
-                                        guidance_scale=args.guidance_scale,
-                                        seed=seed,
-                                        progress_bar=False)
+                                          height=args.size,
+                                          width=args.size,
+                                          guidance_scale=args.guidance_scale,
+                                          seed=seed,
+                                          progress_bar=False)
     # Save the real images
     for i, img in enumerate(real_images):
         to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
@@ -124,7 +150,7 @@ for batch_id, batch in tqdm(enumerate(eval_dataloader)):
 # Need to wait until all processes have finished generating images
 dist.barrier()
 
-# Compute metrics
+# Compute metrics and log images
 if dist.get_local_rank() == 0:
     # Standard FID
     fid_score = fid.compute_fid(args.real_image_path, args.gen_image_path)
@@ -143,3 +169,15 @@ if dist.get_local_rank() == 0:
         wandb.log({'metrics/FID': fid_score})
         wandb.log({'metrics/CLIP-FID': clip_fid_score})
         wandb.log({'metrics/KID': kid_score})
+
+        # Generate images based on args.prompts
+        with get_precision_context(args.precision):
+            generated_images = model.generate(prompt=args.prompts,
+                                              height=args.size,
+                                              width=args.size,
+                                              guidance_scale=args.guidance_scale,
+                                              seed=seed)
+            for prompt, image in zip(args.prompts, generated_images):
+                wandb_logger.log_images(images=image, name=prompt)
+
+dist.barrier()
