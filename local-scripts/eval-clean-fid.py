@@ -6,12 +6,14 @@
 import argparse
 import os
 
+import torch
 import wandb
 from cleanfid import fid
 from composer import Trainer
 from composer.core import get_precision_context
 from composer.loggers import WandBLogger
 from composer.utils import dist
+from torchmetrics.multimodal import CLIPScore
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 
@@ -117,6 +119,8 @@ model = stable_diffusion_2(
     fsdp=False,
 )
 
+clip_score = CLIPScore()
+
 # Load model
 Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
 
@@ -147,6 +151,11 @@ for batch_id, batch in tqdm(enumerate(eval_dataloader)):
     for i, img in enumerate(generated_images):
         to_pil_image(img).save(f'{args.gen_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
 
+    # Calculate CLIPScore
+    captions = [model.tokenizer.decode(caption, skip_special_tokens=True) for caption in captions]
+    scaled_gen_imgs = (generated_images * 255).to(torch.uint8)
+    clip_score.update(scaled_gen_imgs, captions)
+
 # Need to wait until all processes have finished generating images
 dist.barrier()
 
@@ -164,11 +173,15 @@ if dist.get_local_rank() == 0:
     # KID
     kid_score = fid.compute_kid(args.real_image_path, args.gen_image_path)
     print(f'{name} KID: {kid_score}')
+    # CLIP Score
+    clip_score_val = clip_score.compute()
+    print(f'{name} CLIP Score: {clip_score_val}')
     # Optionally log to wandb
     if args.wandb:
         wandb.log({'metrics/FID': fid_score})
         wandb.log({'metrics/CLIP-FID': clip_fid_score})
         wandb.log({'metrics/KID': kid_score})
+        wandb.log({'metrics/CLIP-Score': clip_score_val})
 
         # Generate images based on args.prompts
         with get_precision_context(args.precision):
