@@ -42,6 +42,7 @@ class LNVP(ComposerModel):
             For example, [(0,0.5), (0.5, 1)] Will track the loss separately for the
             first and last halves of the diffusion process. Default:`[(0,1)]`.
         fsdp (bool): whether to use FSDP, Default: `False`.
+        time_as_input (bool): whether to use time as input to the unet.
         image_latents_key (str): key in batch dict for image latents.
             Default: `image_latents`.
         text_latents_key (str): key in batch dict for text latent.
@@ -68,7 +69,8 @@ class LNVP(ComposerModel):
                  text_latents_key: str = 'caption_latents',
                  precomputed_latents: bool = False,
                  encode_latents_in_fp16: bool = False,
-                 fsdp: bool = False):
+                 fsdp: bool = False,
+                 time_as_input: bool = True):
         super().__init__()
         self.unet = unet
         self.vae = vae
@@ -76,6 +78,7 @@ class LNVP(ComposerModel):
         self.image_key = image_key
         self.image_latents_key = image_latents_key
         self.precomputed_latents = precomputed_latents
+        self.time_as_input = time_as_input
 
         # setup metrics
         if train_metrics is None:
@@ -160,8 +163,13 @@ class LNVP(ComposerModel):
         noised_latents = (1 - timesteps.view(-1, 1, 1, 1)) * latents + timesteps.view(-1, 1, 1, 1) * noise
         # Make the targets
         targets = noise - latents
+        # Optionally nuke the timesteps for input
+        if not self.time_as_input:
+            input_timesteps = torch.zeros_like(timesteps)
+        else:
+            input_timesteps = timesteps
         # Forward through the model
-        return self.unet(noised_latents, timesteps, conditioning)['sample'], targets, timesteps
+        return self.unet(noised_latents, input_timesteps, conditioning)['sample'], targets, timesteps
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
@@ -339,8 +347,13 @@ class LNVP(ComposerModel):
             else:
                 latent_model_input = latents
 
+            # Optionally nuke the timestep for input
+            if not self.time_as_input:
+                input_timestep = torch.zeros_like(t)
+            else:
+                input_timestep = t
             # predict the velocity
-            v_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+            v_pred = self.unet(latent_model_input, input_timestep, encoder_hidden_states=text_embeddings).sample
 
             if do_classifier_free_guidance:
                 # perform guidance

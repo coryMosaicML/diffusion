@@ -239,6 +239,7 @@ def lnvp(
     precomputed_latents: bool = False,
     encode_latents_in_fp16: bool = True,
     fsdp: bool = True,
+    time_as_input: bool = True,
 ):
     """lnvp
 
@@ -257,6 +258,7 @@ def lnvp(
         precomputed_latents (bool, optional): Whether to use precomputed latents. Defaults to False.
         encode_latents_in_fp16 (bool, optional): Whether to encode latents in fp16. Defaults to True.
         fsdp (bool, optional): Whether to use FSDP. Defaults to True.
+        time_as_input (bool, optional): Whether to use time as input. Defaults to True.
     """
     if train_metrics is None:
         train_metrics = [MeanSquaredError()]
@@ -299,6 +301,7 @@ def lnvp(
         precomputed_latents=precomputed_latents,
         encode_latents_in_fp16=encode_latents_in_fp16,
         fsdp=fsdp,
+        time_as_input=time_as_input,
     )
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
