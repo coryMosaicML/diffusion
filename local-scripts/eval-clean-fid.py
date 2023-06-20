@@ -172,13 +172,14 @@ if dist.get_local_rank() == 0:
         wandb.log({'metrics/KID': kid_score})
 
         # Generate images based on args.prompts
-        with get_precision_context(args.precision):
-            generated_images = model.generate(prompt=args.prompts,
-                                              height=args.size,
-                                              width=args.size,
-                                              guidance_scale=args.guidance_scale,
-                                              seed=seed)
-            for prompt, image in zip(args.prompts, generated_images):
-                wandb_logger.log_images(images=image, name=prompt)
+        if args.prompts:
+            with get_precision_context(args.precision):
+                generated_images = model.generate(prompt=args.prompts,
+                                                height=args.size,
+                                                width=args.size,
+                                                guidance_scale=args.guidance_scale,
+                                                seed=seed)
+                for prompt, image in zip(args.prompts, generated_images):
+                    wandb_logger.log_images(images=image, name=prompt)
 
 dist.barrier()
