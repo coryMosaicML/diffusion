@@ -31,6 +31,10 @@ class StreamingLAIONDataset(StreamingDataset):
         split (str, optional): The dataset split to use. Currently, only ``None`` is supported. Default: ``None``.
         shuffle (bool): Whether to shuffle the samples in this dataset. Default: ``False``.
         tokenizer_name_or_path (str): The name or path of the tokenizer to use. Default: ``'stabilityai/stable-diffusion-2-base'``.
+        image_key (str): The key to use for the image. Default: ``'jpg'``.
+        text_key (str): The key to use for the text. Default: ``'caption'``.
+        text_latent_key (Optional[str]): The key to use for the text latents. Default: ``None``.
+        text_latents (bool): Whether to use text latents. Default: ``False``.
         transform (Optional[Callable]): The transforms to apply to the image. Default: ``None``.
         predownload (Optional[int]): The number of samples to prefetch. Default: ``100_000``.
         download_retry (Optional[int]): The number of times to retry a download. Default: ``2``.
@@ -48,6 +52,10 @@ class StreamingLAIONDataset(StreamingDataset):
         split: Optional[str] = None,
         shuffle: bool = False,
         tokenizer_name_or_path: str = 'stabilityai/stable-diffusion-2-base',
+        image_key: str = 'jpg',
+        text_key: str = 'caption',
+        text_latent_key: Optional[str] = None,
+        text_latents: bool = False,
         caption_drop_prob: float = 0.0,
         transform: Optional[Callable] = None,
         predownload: int = 100_000,
@@ -75,12 +83,16 @@ class StreamingLAIONDataset(StreamingDataset):
 
         self.transform = transform
         self.tokenizer = CLIPTokenizer.from_pretrained(tokenizer_name_or_path, subfolder='tokenizer')
+        self.image_key = image_key
+        self.text_key = text_key
+        self.text_latent_key = text_latent_key
+        self.text_latents = text_latents
         self.caption_drop_prob = caption_drop_prob
         self.image_size = image_size
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)
-        img = Image.open(BytesIO(sample['jpg']))
+        img = Image.open(BytesIO(sample[self.image_key]))
         if img.mode != 'RGB':
             img = img.convert('RGB')
 
@@ -91,7 +103,7 @@ class StreamingLAIONDataset(StreamingDataset):
         if torch.rand(1) < self.caption_drop_prob:
             caption = ''
         else:
-            caption = sample['caption']
+            caption = sample[self.text_key]
         tokenized_caption = self.tokenizer(
             caption,
             padding='max_length',
@@ -100,9 +112,11 @@ class StreamingLAIONDataset(StreamingDataset):
         )['input_ids']
         tokenized_caption = torch.tensor(tokenized_caption)
         out = {'image': img, 'captions': tokenized_caption}
-        if 'caption_latents' in sample:
+
+        if self.text_latents:
             out['caption_latents'] = torch.from_numpy(
-                np.frombuffer(sample['caption_latents'], dtype=np.float16).copy()).reshape(77, 1024)
+                np.frombuffer(sample[self.text_latent_key], dtype=np.float16).copy()).reshape(77, 1024)
+
         if self.image_size == 256 and 'latents_256' in sample:
             out['image_latents'] = torch.from_numpy(np.frombuffer(sample['latents_256'],
                                                                   dtype=np.float16).copy()).reshape(4, 32, 32)
@@ -117,6 +131,10 @@ def build_streaming_laion_dataloader(
     local: Union[str, List],
     batch_size: int,
     tokenizer_name_or_path: str = 'stabilityai/stable-diffusion-2-base',
+    image_key: str = 'jpg',
+    text_key: str = 'caption',
+    text_latent_key: Optional[str] = None,
+    text_latents: bool = False,
     caption_drop_prob: float = 0.0,
     resize_size: int = 256,
     num_samples: Optional[int] = None,
@@ -135,6 +153,10 @@ def build_streaming_laion_dataloader(
         local (str, Sequence[str]): One or more local filesystem directories where dataset is cached during operation.
         batch_size (int): The batch size to use.
         tokenizer_name_or_path (str): The name or path of the tokenizer to use. Default: ``'stabilityai/stable-diffusion-2-base'``.
+        image_key (str): The key to use for the image. Default: ``'jpg'``.
+        text_key (str): The key to use for the text. Default: ``'caption'``.
+        text_latent_key (Optional[str]): The key to use for the text latents. Default: ``None``.
+        text_latents (bool): Whether to use text latents. Default: ``False``.
         caption_drop_prob (float): The probability of dropping a caption. Default: ``0.0``.
         resize_size (int): The size to resize the image to. Default: ``256``.
         num_samples (Optional[int]): The number of samples to use. Default: ``None`` uses all available samples.
@@ -170,6 +192,10 @@ def build_streaming_laion_dataloader(
         split=None,
         shuffle=shuffle,
         tokenizer_name_or_path=tokenizer_name_or_path,
+        image_key=image_key,
+        text_key=text_key,
+        text_latent_key=text_latent_key,
+        text_latents=text_latents,
         caption_drop_prob=caption_drop_prob,
         transform=transform,
         predownload=predownload,
