@@ -109,17 +109,17 @@ if args.wandb and dist.get_local_rank() == 0:
     wandb.init(name=name, project=args.project, entity=args.entity)
     wandb_logger = WandBLogger(name=name, project=args.project, entity=args.entity)
 
+# Add CLIP Score to the model to move it to the same device
+clip_score = CLIPScore()
 model = stable_diffusion_2(
     model_name='stabilityai/stable-diffusion-2-base',
-    val_metrics=[],
+    val_metrics=[clip_score],
     val_guidance_scales=[],
     val_seed=args.seed,
     pretrained=pretrained,
     encode_latents_in_fp16=False,
     fsdp=False,
 )
-
-clip_score = CLIPScore()
 
 # Load model
 Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
