@@ -6,6 +6,8 @@
 import argparse
 import os
 
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 import torch
 import wandb
 from cleanfid import fid
@@ -13,6 +15,7 @@ from composer import Trainer
 from composer.core import get_precision_context
 from composer.loggers import WandBLogger
 from composer.utils import dist
+from torchmetrics.multimodal import CLIPScore
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 
@@ -25,6 +28,10 @@ parser.add_argument('--remote', type=str, help='path to coco or laion streaming 
 parser.add_argument('--load_path', default=None, type=str, help='path to load model from')
 parser.add_argument('--guidance_scale', default=1.0, type=float, help='guidance scale to evaluate at')
 parser.add_argument('--size', default=512, type=int, help='image size to evaluate at')
+parser.add_argument('--clip_model',
+                    default='openai/clip-vit-base-patch16',
+                    type=str,
+                    help='CLIP model to use for CLIPScore')
 parser.add_argument('--no_crop', action='store_false', help='use resize instead of crop on COCO images.')
 parser.add_argument('--batch_size', default=16, type=int, help='eval batch size to use')
 parser.add_argument('--seed', default=17, type=int)
@@ -121,6 +128,9 @@ model = stable_diffusion_2(
 # Load model
 Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
 
+# Create the CLIPScore metric
+clip_score = CLIPScore(model_name_or_path=args.clip_model).to('cuda')
+
 # Iterate over the eval dataloader
 num_batches = len(eval_dataloader)
 for batch_id, batch in tqdm(enumerate(eval_dataloader)):
@@ -141,6 +151,9 @@ for batch_id, batch in tqdm(enumerate(eval_dataloader)):
                                           guidance_scale=args.guidance_scale,
                                           seed=seed,
                                           progress_bar=False)
+    # Update the CLIPScore metric
+    text_captions = [model.tokenizer.decode(caption, skip_special_tokens=True) for caption in captions]
+    clip_score.update(generated_images, text_captions)
     # Save the real images
     for i, img in enumerate(real_images):
         to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
@@ -156,6 +169,9 @@ if dist.get_local_rank() == 0:
     # Standard FID
     fid_score = fid.compute_fid(args.real_image_path, args.gen_image_path)
     print(f'{name} FID: {fid_score}')
+    # CLIP score
+    clip_score = clip_score.compute()
+    print(f'{name} CLIP score: {clip_score}')
     # CLIP-FID from https://arxiv.org/abs/2203.06026
     clip_fid_score = fid.compute_fid(args.real_image_path,
                                      args.gen_image_path,
@@ -168,6 +184,7 @@ if dist.get_local_rank() == 0:
     # Optionally log to wandb
     if args.wandb:
         wandb.log({'metrics/FID': fid_score})
+        wandb.log({'metrics/CLIP-Score': clip_score})
         wandb.log({'metrics/CLIP-FID': clip_fid_score})
         wandb.log({'metrics/KID': kid_score})
 
@@ -175,10 +192,10 @@ if dist.get_local_rank() == 0:
         if args.prompts:
             with get_precision_context(args.precision):
                 generated_images = model.generate(prompt=args.prompts,
-                                                height=args.size,
-                                                width=args.size,
-                                                guidance_scale=args.guidance_scale,
-                                                seed=seed)
+                                                  height=args.size,
+                                                  width=args.size,
+                                                  guidance_scale=args.guidance_scale,
+                                                  seed=seed)
                 for prompt, image in zip(args.prompts, generated_images):
                     wandb_logger.log_images(images=image, name=prompt)
 
