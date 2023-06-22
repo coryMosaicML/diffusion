@@ -4,6 +4,7 @@
 """Eval script for using clean-fid."""
 
 import argparse
+import json
 import os
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -15,7 +16,9 @@ from composer import Trainer
 from composer.core import get_precision_context
 from composer.loggers import WandBLogger
 from composer.utils import dist
+from PIL import Image
 from torchmetrics.multimodal import CLIPScore
+from torchvision import transforms
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 
@@ -128,9 +131,12 @@ model = stable_diffusion_2(
 # Load model
 Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
 
-# Create the CLIPScore metric
-clip_score = CLIPScore(model_name_or_path=args.clip_model).to('cuda')
+# Create the metric
+device = dist.get_local_rank()
+clip_score = CLIPScore(model_name_or_path=args.clip_model).to(device)
 
+# Storage for prompts
+prompts = {}
 # Iterate over the eval dataloader
 num_batches = len(eval_dataloader)
 for batch_id, batch in tqdm(enumerate(eval_dataloader)):
@@ -151,40 +157,48 @@ for batch_id, batch in tqdm(enumerate(eval_dataloader)):
                                           guidance_scale=args.guidance_scale,
                                           seed=seed,
                                           progress_bar=False)
-    # Update the CLIPScore metric
+    # Get the prompts from the tokens
     text_captions = [model.tokenizer.decode(caption, skip_special_tokens=True) for caption in captions]
     clip_score.update(generated_images, text_captions)
+
     # Save the real images
     for i, img in enumerate(real_images):
         to_pil_image(img).save(f'{args.real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
+        prompts[f'{batch_id}_{i}_rank_{dist.get_local_rank()}'] = text_captions[i]
     # Save the generated images
     for i, img in enumerate(generated_images):
         to_pil_image(img).save(f'{args.gen_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
 
+# Save the prompts as json
+json.dump(prompts, open(f'{args.real_image_path}/prompts_rank_{dist.get_local_rank()}.json', 'w'))
+
 # Need to wait until all processes have finished generating images
 dist.barrier()
+
+clip_score_value = clip_score.compute()
 
 # Compute metrics and log images
 if dist.get_local_rank() == 0:
     # Standard FID
     fid_score = fid.compute_fid(args.real_image_path, args.gen_image_path)
     print(f'{name} FID: {fid_score}')
-    # CLIP score
-    clip_score = clip_score.compute()
-    print(f'{name} CLIP score: {clip_score}')
+
+    print(f'{name} CLIP score: {clip_score_value}')
+
     # CLIP-FID from https://arxiv.org/abs/2203.06026
     clip_fid_score = fid.compute_fid(args.real_image_path,
                                      args.gen_image_path,
                                      mode='clean',
                                      model_name='clip_vit_b_32')
     print(f'{name} CLIP-FID: {clip_fid_score}')
+
     # KID
     kid_score = fid.compute_kid(args.real_image_path, args.gen_image_path)
     print(f'{name} KID: {kid_score}')
     # Optionally log to wandb
     if args.wandb:
         wandb.log({'metrics/FID': fid_score})
-        wandb.log({'metrics/CLIP-Score': clip_score})
+        wandb.log({'metrics/CLIP-Score': clip_score_value})
         wandb.log({'metrics/CLIP-FID': clip_fid_score})
         wandb.log({'metrics/KID': kid_score})
 
