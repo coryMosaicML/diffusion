@@ -224,6 +224,10 @@ def generate_images_from_prompts(args, model, guidance_scale):
 
 if __name__ == '__main__':
     args = process_arguments(sys.argv[1:])
+    # Init wandb
+    if args.wandb and dist.get_local_rank() == 0:
+        wandb.init(name=args.name, project=args.project, entity=args.entity)
+        wandb_logger = WandBLogger(name=args.name, project=args.project, entity=args.entity)
     # Create the eval dataloader
     eval_dataloader = make_dataloader(args)
     # Load the model
@@ -231,10 +235,6 @@ if __name__ == '__main__':
     # Create the clip metric
     device = dist.get_local_rank()
     clip_metric = CLIPScore(model_name_or_path=args.clip_model).to(device)
-    # Init wandb
-    if args.wandb and dist.get_local_rank() == 0:
-        wandb.init(name=args.name, project=args.project, entity=args.entity)
-        wandb_logger = WandBLogger(name=args.name, project=args.project, entity=args.entity)
     # Generate images and compute metrics for each guidance scale
     for guidance_scale in args.guidance_scale:
         dist.barrier()
