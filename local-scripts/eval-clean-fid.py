@@ -189,24 +189,26 @@ def compute_metrics(args, guidance_scale, clip_metric):
     metrics['CLIP-score'] = clip_score
     print(f'{guidance_scale} CLIP score: {clip_score}')
 
-    # Only run clean-fid on rank 0
-    if dist.get_local_rank() == 0:
-        # Standard FID
-        fid_score = fid.compute_fid(real_image_path, gen_image_path, verbose=False)
-        metrics['FID'] = fid_score
-        print(f'{guidance_scale} FID: {fid_score}')
-        # CLIP-FID from https://arxiv.org/abs/2203.06026
-        clip_fid_score = fid.compute_fid(real_image_path,
-                                         gen_image_path,
-                                         mode='clean',
-                                         model_name='clip_vit_b_32',
-                                         verbose=False)
-        metrics['CLIP-FID'] = clip_fid_score
-        print(f'{guidance_scale} CLIP-FID: {clip_fid_score}')
-        # KID
-        kid_score = fid.compute_kid(real_image_path, gen_image_path, verbose=False)
-        metrics['KID'] = kid_score
-        print(f'{guidance_scale} KID: {kid_score}')
+    # Need to tell clean-fid which device to use
+    device = torch.device(dist.get_local_rank())
+    # Standard FID
+    fid_score = fid.compute_fid(real_image_path, gen_image_path, device=device, use_dataparallel=False, verbose=False)
+    metrics['FID'] = fid_score
+    print(f'{guidance_scale} FID: {fid_score}')
+    # CLIP-FID from https://arxiv.org/abs/2203.06026
+    clip_fid_score = fid.compute_fid(real_image_path,
+                                     gen_image_path,
+                                     mode='clean',
+                                     model_name='clip_vit_b_32',
+                                     device=device,
+                                     use_dataparallel=False,
+                                     verbose=False)
+    metrics['CLIP-FID'] = clip_fid_score
+    print(f'{guidance_scale} CLIP-FID: {clip_fid_score}')
+    # KID
+    kid_score = fid.compute_kid(real_image_path, gen_image_path, device=device, use_dataparallel=False, verbose=False)
+    metrics['KID'] = kid_score
+    print(f'{guidance_scale} KID: {kid_score}')
     return metrics
 
 
