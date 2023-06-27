@@ -8,6 +8,7 @@ import json
 import os
 import sys
 
+import clip
 import torch
 import wandb
 from cleanfid import fid
@@ -236,6 +237,8 @@ if __name__ == '__main__':
     # Create the clip metric
     device = dist.get_local_rank()
     clip_metric = CLIPScore(model_name_or_path=args.clip_model).to(device)
+    # Predownload the CLIP model for computing clip-fid
+    _, _ = clip.load('ViT-B/32', device=device)
     # Generate images and compute metrics for each guidance scale
     for guidance_scale in args.guidance_scale:
         dist.barrier()
