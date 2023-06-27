@@ -163,8 +163,7 @@ def generate_images(args, model, eval_dataloader, guidance_scale, clip_metric):
                                               progress_bar=False)
         # Get the prompts from the tokens
         text_captions = [model.tokenizer.decode(caption, skip_special_tokens=True) for caption in captions]
-        clip_metric.update(generated_images, text_captions)
-
+        clip_metric.update((generated_images * 255).to(torch.uint8), text_captions)
         # Save the real images
         for i, img in enumerate(real_images):
             to_pil_image(img).save(f'{real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
