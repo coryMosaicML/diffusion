@@ -35,7 +35,7 @@ def process_arguments(args):
     parser.add_argument('--remote', type=str, help='path to coco or laion streaming dataset(s)', nargs='+')
     parser.add_argument('--load_path', default=None, type=str, help='path to load model from')
     parser.add_argument('--guidance_scale',
-                        default=[1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                        default=[0.0, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
                         type=float,
                         nargs='*',
                         help='guidance scale to evaluate at')
