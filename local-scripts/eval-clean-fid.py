@@ -24,7 +24,8 @@ from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
 
 from diffusion.callbacks import LogDiffusionImages
-from diffusion.datasets import build_streaming_cocoval_dataloader, build_streaming_laion_dataloader
+from diffusion.datasets import (build_streaming_cocoval_dataloader, build_streaming_image_caption_dataloader,
+                                build_streaming_laion_dataloader)
 from diffusion.models import stable_diffusion_2
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -106,6 +107,19 @@ def make_dataloader(args):
             drop_last=False,
             shuffle=True,
         )
+    else:
+        # Define a local directory for each remote path
+        local = [f'/tmp/mds-cache/mds-dataset/{i}' for i in range(len(args.remote))]
+        dataloader_kwargs = {'drop_last': False, 'shuffle': False, 'num_workers': 8}
+        eval_dataloader = build_streaming_image_caption_dataloader(
+            remote=args.remote,
+            local=local,
+            batch_size=args.batch_size,
+            resize_size=args.size,
+            image_key='image',
+            caption_key='caption',
+            dataloader_kwargs=dataloader_kwargs,
+        )
     return eval_dataloader
 
 
@@ -168,7 +182,8 @@ def generate_images(args, model, eval_dataloader, guidance_scale, clip_metric):
         clip_metric.update((generated_images * 255).to(torch.uint8), text_captions)
         # Save the real images
         for i, img in enumerate(real_images):
-            to_pil_image(img).save(f'{real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
+            # Real images are -1, 1, so rescale to 0, 1.
+            to_pil_image((img + 1) / 2).save(f'{real_image_path}/{batch_id}_{i}_rank_{dist.get_local_rank()}.png')
             prompts[f'{batch_id}_{i}_rank_{dist.get_local_rank()}'] = text_captions[i]
         # Save the generated images
         for i, img in enumerate(generated_images):
