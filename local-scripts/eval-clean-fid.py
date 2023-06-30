@@ -12,7 +12,6 @@ import clip
 import torch
 import wandb
 from cleanfid import fid
-from cleanfid.features import feature_extractor
 from composer import Trainer
 from composer.core import get_precision_context
 from composer.loggers import WandBLogger
@@ -255,8 +254,6 @@ if __name__ == '__main__':
     clip_metric = CLIPScore(model_name_or_path=args.clip_model).to(device)
     # Predownload the CLIP model for computing clip-fid
     _, _ = clip.load('ViT-B/32', device=device)
-    # Predownload the feature extractor for computing FID
-    _ = feature_extractor(device=device, use_dataparallel=False)
     # Generate images and compute metrics for each guidance scale
     for guidance_scale in args.guidance_scale:
         dist.barrier()
