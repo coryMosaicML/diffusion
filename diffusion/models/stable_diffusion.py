@@ -342,18 +342,15 @@ class StableDiffusion(ComposerModel):
         assert height is not None  # for type checking
         assert width is not None  # for type checking
 
-        do_classifier_free_guidance = guidance_scale > 1.0  # type: ignore
-
         text_embeddings = self._prepare_text_embeddings(prompt, tokenized_prompts, prompt_embeds, num_images_per_prompt)
         batch_size = len(text_embeddings)  # len prompts * num_images_per_prompt
         # classifier free guidance + negative prompts
         # negative prompt is given in place of the unconditional input in classifier free guidance
-        if do_classifier_free_guidance:
-            negative_prompt = negative_prompt or ([''] * (batch_size // num_images_per_prompt))  # type: ignore
-            unconditional_embeddings = self._prepare_text_embeddings(negative_prompt, tokenized_negative_prompts,
-                                                                     negative_prompt_embeds, num_images_per_prompt)
-            # concat uncond + prompt
-            text_embeddings = torch.cat([unconditional_embeddings, text_embeddings])
+        negative_prompt = negative_prompt or ([''] * (batch_size // num_images_per_prompt))  # type: ignore
+        unconditional_embeddings = self._prepare_text_embeddings(negative_prompt, tokenized_negative_prompts,
+                                                                 negative_prompt_embeds, num_images_per_prompt)
+        # concat uncond + prompt
+        text_embeddings = torch.cat([unconditional_embeddings, text_embeddings])
 
         # prepare for diffusion generation process
         latents = torch.randn(
@@ -367,19 +364,15 @@ class StableDiffusion(ComposerModel):
 
         # backward diffusion process
         for t in tqdm(self.inference_scheduler.timesteps, disable=not progress_bar):
-            if do_classifier_free_guidance:
-                latent_model_input = torch.cat([latents] * 2)
-            else:
-                latent_model_input = latents
+            latent_model_input = torch.cat([latents] * 2)
 
             latent_model_input = self.inference_scheduler.scale_model_input(latent_model_input, t)
             # Model prediction
             pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
 
-            if do_classifier_free_guidance:
-                # perform guidance. Note this is only techincally correct for prediction_type 'epsilon'
-                pred_uncond, pred_text = pred.chunk(2)
-                pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
+            # perform guidance. Note this is only techincally correct for prediction_type 'epsilon'
+            pred_uncond, pred_text = pred.chunk(2)
+            pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.inference_scheduler.step(pred, t, latents, generator=rng_generator).prev_sample
