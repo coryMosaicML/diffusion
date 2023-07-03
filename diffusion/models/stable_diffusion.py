@@ -332,9 +332,6 @@ class StableDiffusion(ComposerModel):
 
         # Create rng for the generation
         device = self.vae.device
-        rng_generator = torch.Generator(device=device)
-        if seed:
-            rng_generator = rng_generator.manual_seed(seed)  # type: ignore
 
         vae_scale_factor = 8
         height = height or self.unet.config.sample_size * vae_scale_factor
@@ -358,9 +355,7 @@ class StableDiffusion(ComposerModel):
         # prepare for diffusion generation process
         latents = torch.randn(
             (batch_size, self.unet.config.in_channels, height // vae_scale_factor, width // vae_scale_factor),
-            device=device,
-            generator=rng_generator,
-        )
+            device=device)
 
         self.inference_scheduler.set_timesteps(num_inference_steps)
         # scale the initial noise by the standard deviation required by the scheduler
