@@ -41,6 +41,7 @@ def process_arguments(args):
                         nargs='*',
                         help='guidance scale to evaluate at')
     parser.add_argument('--size', default=512, type=int, help='image size to evaluate at')
+    parser.add_argument('--prediction_type', default='epsilon', type=str, help='prediction type to use')
     parser.add_argument('--clip_model',
                         default='openai/clip-vit-base-patch16',
                         type=str,
@@ -128,6 +129,7 @@ def load_checkpoint(args, eval_dataloader):
 
     model = stable_diffusion_2(
         model_name='stabilityai/stable-diffusion-2-base',
+        prediction_type=args.prediction_type,
         val_metrics=[],
         val_guidance_scales=[],
         val_seed=args.seed,
