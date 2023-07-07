@@ -11,7 +11,7 @@ from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, UNet2DConditi
 from torchmetrics import MeanSquaredError
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.multimodal.clip_score import CLIPScore
-from transformers import CLIPTextModel, CLIPTokenizer, PretrainedConfig
+from transformers import CLIPTextModel, CLIPTokenizer
 
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
@@ -37,6 +37,7 @@ def stable_diffusion_2(
     precomputed_latents: bool = False,
     encode_latents_in_fp16: bool = True,
     fsdp: bool = True,
+    width_multiplier: float = 1.0,
 ):
     """Stable diffusion v2 training setup.
 
@@ -60,6 +61,7 @@ def stable_diffusion_2(
         precomputed_latents (bool, optional): Whether to use precomputed latents. Defaults to False.
         encode_latents_in_fp16 (bool, optional): Whether to encode latents in fp16. Defaults to True.
         fsdp (bool, optional): Whether to use FSDP. Defaults to True.
+        width_multiplier (float): Multiplier for the network width. Ignored if using the pretrained model. Defaults to 1.0.
     """
     if train_metrics is None:
         train_metrics = [MeanSquaredError()]
@@ -77,8 +79,29 @@ def stable_diffusion_2(
     if pretrained:
         unet = UNet2DConditionModel.from_pretrained(model_name, subfolder='unet')
     else:
-        config = PretrainedConfig.get_config_dict(model_name, subfolder='unet')
-        unet = UNet2DConditionModel(**config[0])
+        num_channels = [320, 640, 1280, 1280]
+        num_groups = 32
+        num_channels = [round(width_multiplier * c / num_groups) * num_groups for c in num_channels]
+        unet = UNet2DConditionModel(
+            act_fn='silu',
+            attention_head_dim=[5, 10, 20, 20],
+            block_out_channels=num_channels,
+            center_input_sample=False,
+            cross_attention_dim=1024,
+            down_block_types=['CrossAttnDownBlock2D', 'CrossAttnDownBlock2D', 'CrossAttnDownBlock2D', 'DownBlock2D'],
+            downsample_padding=1,
+            dual_cross_attention=False,
+            flip_sin_to_cos=True,
+            freq_shift=0,
+            in_channels=4,
+            layers_per_block=2,
+            mid_block_scale_factor=1,
+            norm_eps=1e-05,
+            norm_num_groups=num_groups,
+            out_channels=4,
+            sample_size=96,
+            up_block_types=['UpBlock2D', 'CrossAttnUpBlock2D', 'CrossAttnUpBlock2D', 'CrossAttnUpBlock2D'],
+            use_linear_projection=True)
 
     if encode_latents_in_fp16:
         vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae', torch_dtype=torch.float16)
