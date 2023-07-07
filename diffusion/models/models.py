@@ -83,23 +83,29 @@ def stable_diffusion_2(
         num_channels = [320, 640, 1280, 1280]
         num_channels = [round(width_multiplier * c / factor) * factor for c in num_channels]
         head_dims = [int(c / factor) for c in num_channels]
-        unet = UNet2DConditionModel(act_fn='silu',
-                                    attention_head_dim=head_dims,
-                                    block_out_channels=num_channels,
-                                    center_input_sample=False,
-                                    cross_attention_dim=1024,
-                                    downsample_padding=1,
-                                    dual_cross_attention=False,
-                                    flip_sin_to_cos=True,
-                                    freq_shift=0,
-                                    in_channels=4,
-                                    layers_per_block=2,
-                                    mid_block_scale_factor=1,
-                                    norm_eps=1e-05,
-                                    norm_num_groups=factor,
-                                    out_channels=4,
-                                    sample_size=96,
-                                    use_linear_projection=True)
+        unet = UNet2DConditionModel(
+            act_fn='silu',
+            attention_head_dim=head_dims,
+            block_out_channels=num_channels,
+            center_input_sample=False,
+            cross_attention_dim=1024,
+            down_block_types=['CrossAttnDownBlock2D', 'CrossAttnDownBlock2D', 'CrossAttnDownBlock2D', 'DownBlock2D'],
+            downsample_padding=1,
+            dual_cross_attention=False,
+            flip_sin_to_cos=True,
+            freq_shift=0,
+            in_channels=4,
+            layers_per_block=2,
+            mid_block_scale_factor=1,
+            norm_eps=1e-05,
+            norm_num_groups=factor,
+            out_channels=4,
+            sample_size=96,
+            up_block_types=['UpBlock2D', 'CrossAttnUpBlock2D', 'CrossAttnUpBlock2D', 'CrossAttnUpBlock2D'],
+            use_linear_projection=True)
+        # Can't fsdp wrap up_blocks or down_blocks because the forward pass calls length on these :-(
+        unet.up_blocks._fsdp_wrap = False
+        unet.down_blocks._fsdp_wrap = False
 
     if encode_latents_in_fp16:
         vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae', torch_dtype=torch.float16)
