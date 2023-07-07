@@ -79,12 +79,13 @@ def stable_diffusion_2(
     if pretrained:
         unet = UNet2DConditionModel.from_pretrained(model_name, subfolder='unet')
     else:
+        factor = 64
         num_channels = [320, 640, 1280, 1280]
-        num_groups = 32
-        num_channels = [round(width_multiplier * c / num_groups) * num_groups for c in num_channels]
+        num_channels = [round(width_multiplier * c / factor) * factor for c in num_channels]
+        head_dims = [int(c / factor) for c in num_channels]
         unet = UNet2DConditionModel(
             act_fn='silu',
-            attention_head_dim=[5, 10, 20, 20],
+            attention_head_dim=head_dims,
             block_out_channels=num_channels,
             center_input_sample=False,
             cross_attention_dim=1024,
@@ -97,7 +98,7 @@ def stable_diffusion_2(
             layers_per_block=2,
             mid_block_scale_factor=1,
             norm_eps=1e-05,
-            norm_num_groups=num_groups,
+            norm_num_groups=factor,
             out_channels=4,
             sample_size=96,
             up_block_types=['UpBlock2D', 'CrossAttnUpBlock2D', 'CrossAttnUpBlock2D', 'CrossAttnUpBlock2D'],
