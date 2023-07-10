@@ -1,10 +1,11 @@
-import math
-import torch
-import torch.nn as nn
+# Copyright 2022 MosaicML Diffusion authors
+# SPDX-License-Identifier: Apache-2.0
 
+import math
 from typing import List, Optional
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from composer.models import ComposerModel
 from torchmetrics import MeanSquaredError, Metric
@@ -35,16 +36,16 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         # Calculate the qk product. Don't forget to scale!
-        qk = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(k.size(-1)) # (B, num_heads, T, T)
+        qk = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(k.size(-1))  # (B, num_heads, T, T)
         # Apply the mask. Elements to be ignored should have a value of -inf.
         if mask is not None:
             qk = qk.masked_fill(mask == 0, float('-inf'))
         # Apply the softmax.
-        attention_weights = torch.softmax(qk, dim=-1) # (B, num_heads, T, T)
+        attention_weights = torch.softmax(qk, dim=-1)  # (B, num_heads, T, T)
         # Apply the attention weights to the values.
-        attention_out = torch.matmul(attention_weights, v) # (B, num_heads, T, C // num_heads)
+        attention_out = torch.matmul(attention_weights, v)  # (B, num_heads, T, C // num_heads)
         # Swap the sequence length and the head dimension back and get rid of num_heads.
-        attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C)
+        attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
         # Final linear layer to get the output
         out = self.output_layer(attention_out)
         return out
@@ -68,8 +69,7 @@ class DiTBlock(nn.Module):
         self.nonlinearity = nn.GELU(approximate='tanh')
         self.linear_2 = nn.Linear(self.expansion_factor * self.num_features, self.num_features)
         # MLP for the modulations
-        self.adaLN_mlp = nn.Sequential(nn.SiLU(),
-                                            nn.Linear(self.num_features, 6 * self.num_features, bias=True))
+        self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(self.num_features, 6 * self.num_features, bias=True))
         # Initialize the modulations to zero. This will ensure the block acts as identity at initialization
         nn.init.zeros_(self.adaLN_mlp[1].weight)
         nn.init.zeros_(self.adaLN_mlp[1].bias)
@@ -96,16 +96,17 @@ class DiTBlock(nn.Module):
 class DiffusionTransformer(nn.Module):
     """Transformer model for diffusion"""
 
-    def __init__(self, num_features,
-                       num_heads,
-                       num_layers,
-                       patch_size=16,
-                       image_size=256,
-                       cond_features_in=1024,
-                       cond_timesteps=77,
-                       num_timesteps=1000,
-                       input_channels=3,
-                       expansion_factor=4):
+    def __init__(self,
+                 num_features,
+                 num_heads,
+                 num_layers,
+                 patch_size=16,
+                 image_size=256,
+                 cond_features_in=1024,
+                 cond_timesteps=77,
+                 num_timesteps=1000,
+                 input_channels=3,
+                 expansion_factor=4):
         super().__init__()
         self.num_features = num_features
         self.num_heads = num_heads
@@ -125,7 +126,7 @@ class DiffusionTransformer(nn.Module):
         # Embedding for the conditioning
         self.conditioning_embedding = nn.Linear(cond_features_in, self.num_features)
         # Embedding for the sequence positions
-        self.image_block_size = (self.image_size // self.patch_size) ** 2
+        self.image_block_size = (self.image_size // self.patch_size)**2
         block_size = self.image_block_size + self.cond_timesteps
         self.position_embedding = nn.Embedding(block_size, self.num_features)
         # Transformer blocks
@@ -139,21 +140,20 @@ class DiffusionTransformer(nn.Module):
                                                self.patch_size,
                                                stride=self.patch_size)
 
-
     def forward(self, x, t, conditioning=None, mask=None):
         # Embed the timestep
         t = self.timestep_embedding(t)
         # Patchify the image
         x = self.patch_embedding(x)
         # Flatten the image
-        x = x.flatten(2).transpose(1, 2) # (B, I, C)
+        x = x.flatten(2).transpose(1, 2)  # (B, I, C)
         # Embed the conditioning
-        c = self.conditioning_embedding(conditioning) # (B, T, C)
+        c = self.conditioning_embedding(conditioning)  # (B, T, C)
         # Concatenate the image and the conditioning
-        x = torch.cat([x, c], dim=1) # (B, T+I, C)
+        x = torch.cat([x, c], dim=1)  # (B, T+I, C)
         # Add the position embedding
-        positions = torch.arange(x.size(1), device=x.device).unsqueeze(0) # (1, T+I)
-        x = x + self.position_embedding(positions) # (B, T+I, C)
+        positions = torch.arange(x.size(1), device=x.device).unsqueeze(0)  # (1, T+I)
+        x = x + self.position_embedding(positions)  # (B, T+I, C)
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(x, t, mask=mask)
@@ -166,6 +166,7 @@ class DiffusionTransformer(nn.Module):
 
 
 class ComposerDiffusionTransformer(ComposerModel):
+
     def __init__(self,
                  model,
                  text_encoder,
@@ -179,13 +180,15 @@ class ComposerDiffusionTransformer(ComposerModel):
                  val_guidance_scales: Optional[List] = None,
                  loss_bins: Optional[List] = None,
                  image_key: str = 'image',
-                 text_key: str = 'captions'):
+                 text_key: str = 'captions',
+                 fsdp: bool = True):
         super().__init__()
         self.model = model
         self.noise_scheduler = noise_scheduler
         self.loss_fn = loss_fn
         self.val_seed = val_seed
         self.image_key = image_key
+        self.fsdp = fsdp
 
         # setup metrics
         if train_metrics is None:
@@ -230,6 +233,11 @@ class ComposerDiffusionTransformer(ComposerModel):
         self.text_key = text_key
         # freeze text_encoder during diffusion training
         self.text_encoder.requires_grad_(False)
+
+        if fsdp:
+            # only wrap models we are training
+            self.text_encoder._fsdp_wrap = False
+            self.model._fsdp_wrap = True
 
     def forward(self, batch):
         inputs, conditioning = batch[self.image_key], batch[self.text_key]
