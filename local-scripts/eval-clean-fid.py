@@ -41,6 +41,7 @@ def process_arguments(args):
                         nargs='*',
                         help='guidance scale to evaluate at')
     parser.add_argument('--size', default=512, type=int, help='image size to evaluate at')
+    parser.add_argument('--width', default=1.0, type=float, help='width parameter')
     parser.add_argument('--prediction_type', default='epsilon', type=str, help='prediction type to use')
     parser.add_argument('--clip_model',
                         default='openai/clip-vit-base-patch16',
@@ -127,16 +128,15 @@ def load_checkpoint(args, eval_dataloader):
     """Load the model from a checkpoint."""
     pretrained = args.load_path is None
 
-    model = stable_diffusion_2(
-        model_name='stabilityai/stable-diffusion-2-base',
-        prediction_type=args.prediction_type,
-        val_metrics=[],
-        val_guidance_scales=[],
-        val_seed=args.seed,
-        pretrained=pretrained,
-        encode_latents_in_fp16=False,
-        fsdp=False,
-    )
+    model = stable_diffusion_2(model_name='stabilityai/stable-diffusion-2-base',
+                               prediction_type=args.prediction_type,
+                               val_metrics=[],
+                               val_guidance_scales=[],
+                               val_seed=args.seed,
+                               pretrained=pretrained,
+                               encode_latents_in_fp16=False,
+                               fsdp=False,
+                               width_multiplier=args.width)
 
     # Load model
     Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
