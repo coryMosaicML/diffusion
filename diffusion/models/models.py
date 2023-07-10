@@ -16,6 +16,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, PretrainedConfig
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
+from diffusion.models.transformer import ComposerDiffusionTransformer, DiffusionTransformer
 
 try:
     import xformers  # type: ignore
@@ -225,4 +226,61 @@ def continuous_pixel_diffusion(clip_model_name: str = 'openai/clip-vit-large-pat
         model = DeviceGPU().module_to_device(model)
         if is_xformers_installed:
             model.model.enable_xformers_memory_efficient_attention()
+    return model
+
+
+def diffusion_transformer(model_name: str = 'stabilityai/stable-diffusion-2-base',
+                        num_features: int = 1024,
+                        num_heads: int = 16,
+                        num_layers: int = 3,
+                        patch_size: int = 16,
+                        train_metrics: Optional[List] = None,
+                        val_metrics: Optional[List] = None,
+                        val_guidance_scales: Optional[List] = None,
+                        val_seed: int = 1138,
+                        loss_bins: Optional[List] = None,):
+    if train_metrics is None:
+        train_metrics = [MeanSquaredError()]
+    if val_metrics is None:
+        val_metrics = [MeanSquaredError(), FrechetInceptionDistance(normalize=True)]
+    if val_guidance_scales is None:
+        val_guidance_scales = [1.0, 3.0, 7.0]
+    if loss_bins is None:
+        loss_bins = [(0, 1)]
+    # Fix a bug where CLIPScore requires grad
+    for metric in val_metrics:
+        if isinstance(metric, CLIPScore):
+            metric.requires_grad_(False)
+
+    dit_model = DiffusionTransformer(num_features=num_features,
+                                 num_heads=num_heads,
+                                 num_layers=num_layers,
+                                 patch_size=patch_size,
+                                 image_size=256,
+                                 cond_features_in=1024,
+                                 cond_timesteps=77,
+                                 num_timesteps=1000,
+                                 input_channels=3,
+                                 expansion_factor=4)
+
+    text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
+    tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
+    noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
+    inference_noise_scheduler = DDIMScheduler.from_pretrained(model_name, subfolder='scheduler')
+
+    model = ComposerDiffusionTransformer(model=dit_model,
+                                        text_encoder=text_encoder,
+                                        tokenizer=tokenizer,
+                                        noise_scheduler=noise_scheduler,
+                                        inference_noise_scheduler=inference_noise_scheduler,
+                                        train_metrics=train_metrics,
+                                        val_metrics=val_metrics,
+                                        val_seed=1138,
+                                        val_guidance_scales=val_guidance_scales,
+                                        loss_bins=loss_bins,
+                                        image_key='image',
+                                        text_key='captions')
+
+    if torch.cuda.is_available():
+        model = DeviceGPU().module_to_device(model)
     return model
