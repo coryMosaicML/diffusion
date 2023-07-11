@@ -23,6 +23,9 @@ class SelfAttention(nn.Module):
         self.qkv = nn.Linear(self.num_features, 3 * self.num_features)
         # Linear layer to get the output
         self.output_layer = nn.Linear(self.num_features, self.num_features)
+        # Initialize all biases to zero
+        nn.init.zeros_(self.qkv.bias)
+        nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, x, mask=None):
         # Get the shape of the input
@@ -70,6 +73,9 @@ class DiTBlock(nn.Module):
         self.linear_2 = nn.Linear(self.expansion_factor * self.num_features, self.num_features)
         # MLP for the modulations
         self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(self.num_features, 6 * self.num_features, bias=True))
+        # Initialize all biases to zero
+        nn.init.zeros_(self.linear_1.bias)
+        nn.init.zeros_(self.linear_2.bias)
         # Initialize the modulations to zero. This will ensure the block acts as identity at initialization
         nn.init.zeros_(self.adaLN_mlp[1].weight)
         nn.init.zeros_(self.adaLN_mlp[1].bias)
@@ -139,6 +145,9 @@ class DiffusionTransformer(nn.Module):
                                                self.input_channels,
                                                self.patch_size,
                                                stride=self.patch_size)
+        # Initialize the output layer to zero.
+        nn.init.zeros_(self.output_layer.weight)
+        nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, x, t, conditioning=None, mask=None):
         # Embed the timestep
