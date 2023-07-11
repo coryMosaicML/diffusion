@@ -129,12 +129,22 @@ class DiffusionTransformer(nn.Module):
         self.timestep_embedding = nn.Embedding(self.num_timesteps, self.num_features)
         # Patching layer for images
         self.patch_embedding = nn.Conv2d(3, self.num_features, self.patch_size, stride=self.patch_size)
+        # Init the patch embedding so it will add with positional embedding and respect scaling
+        nn.init.kaiming_uniform_(self.patch_embedding.weight, nonlinearity='linear')
+        nn.init.zeros_(self.patch_embedding.bias)
+        self.patch_embedding.weight.data /= math.sqrt(2.0)
         # Embedding for the conditioning
         self.conditioning_embedding = nn.Linear(cond_features_in, self.num_features)
+        # Init the conditioning embedding so it will add with positional embedding and respect scaling
+        nn.init.kaiming_uniform_(self.conditioning_embedding.weight, nonlinearity='linear')
+        nn.init.zeros_(self.conditioning_embedding.bias)
+        self.conditioning_embedding.weight.data /= math.sqrt(2.0)
         # Embedding for the sequence positions
         self.image_block_size = (self.image_size // self.patch_size)**2
         block_size = self.image_block_size + self.cond_timesteps
         self.position_embedding = nn.Embedding(block_size, self.num_features)
+        # Init the position embedding so it will add with patch embedding and conditioning embedding
+        self.position_embedding.weight.data /= math.sqrt(2.0)
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
             DiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
@@ -162,7 +172,8 @@ class DiffusionTransformer(nn.Module):
         x = torch.cat([x, c], dim=1)  # (B, T+I, C)
         # Add the position embedding
         positions = torch.arange(x.size(1), device=x.device).unsqueeze(0)  # (1, T+I)
-        x = x + self.position_embedding(positions)  # (B, T+I, C)
+        position_embeddings = self.position_embedding(positions)  # (1, T+I, C)
+        x = x + position_embeddings  # (B, T+I, C)
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(x, t, mask=mask)
