@@ -12,6 +12,11 @@ from torchmetrics import MeanSquaredError, Metric
 from tqdm.auto import tqdm
 
 
+def modulate(x, shift, scale):
+    """Modulate the input with the shift and scale"""
+    return x * (1.0 + scale) + shift
+
+
 class SelfAttention(nn.Module):
     """Standard self attention layer that supports masking"""
 
@@ -63,10 +68,10 @@ class DiTBlock(nn.Module):
         self.num_heads = num_heads
         self.expansion_factor = expansion_factor
         # Layer norm before the self attention
-        self.layer_norm_1 = nn.LayerNorm(self.num_features, elementwise_affine=False)
+        self.layer_norm_1 = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
         self.attention = SelfAttention(self.num_features, self.num_heads)
         # Layer norm before the MLP
-        self.layer_norm_2 = nn.LayerNorm(self.num_features, elementwise_affine=False)
+        self.layer_norm_2 = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
         # MLP layers. The MLP expands and then contracts the features.
         self.linear_1 = nn.Linear(self.num_features, self.expansion_factor * self.num_features)
         self.nonlinearity = nn.GELU(approximate='tanh')
@@ -80,18 +85,14 @@ class DiTBlock(nn.Module):
         nn.init.zeros_(self.adaLN_mlp[1].weight)
         nn.init.zeros_(self.adaLN_mlp[1].bias)
 
-    def _modulate(self, x, shift, scale):
-        """Modulate the input with the shift and scale"""
-        return x * (1.0 + scale) + shift
-
     def forward(self, x, c, mask=None):
         # Calculate the modulations. Each is shape (B, num_features).
         mods = self.adaLN_mlp(c).unsqueeze(1).chunk(6, dim=2)
         # Forward, with modulations
-        y = self._modulate(self.layer_norm_1(x), mods[0], mods[1])
+        y = modulate(self.layer_norm_1(x), mods[0], mods[1])
         y = mods[2] * self.attention(y, mask=mask)
         x = x + y
-        y = self._modulate(self.layer_norm_2(x), mods[3], mods[4])
+        y = modulate(self.layer_norm_2(x), mods[3], mods[4])
         y = self.linear_1(y)
         y = self.nonlinearity(y)
         y = mods[5] * self.linear_2(y)
@@ -140,6 +141,7 @@ class DiffusionTransformer(nn.Module):
         nn.init.zeros_(self.conditioning_embedding.bias)
         self.conditioning_embedding.weight.data /= math.sqrt(2.0)
         # Embedding for the sequence positions
+        self.patches_per_side = self.image_size // self.patch_size
         self.image_block_size = (self.image_size // self.patch_size)**2
         block_size = self.image_block_size + self.cond_timesteps
         self.position_embedding = nn.Embedding(block_size, self.num_features)
@@ -151,13 +153,9 @@ class DiffusionTransformer(nn.Module):
             for _ in range(self.num_layers)
         ])
         # Output layer
-        self.output_layer = nn.ConvTranspose2d(self.num_features,
-                                               self.input_channels,
-                                               self.patch_size,
-                                               stride=self.patch_size)
-        # Initialize the output layer to zero.
-        nn.init.zeros_(self.output_layer.weight)
-        nn.init.zeros_(self.output_layer.bias)
+        self.final_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
+        self.final_linear = nn.Linear(self.num_features, self.input_channels * (self.patch_size**2))
+        self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(self.num_features, 2 * self.num_features))
 
     def forward(self, x, t, conditioning=None, mask=None):
         # Embed the timestep
@@ -177,11 +175,17 @@ class DiffusionTransformer(nn.Module):
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
             x = block(x, t, mask=mask)
-        # Unflatten the output
-        x = x[:, 0:self.image_block_size, :].transpose(1, 2)
-        x = x.unflatten(2, (self.image_size // self.patch_size, self.image_size // self.patch_size))
-        # Pass through the output layer to get back to the image size
-        x = self.output_layer(x)
+        # Throw away the conditioning tokens
+        x = x[:, 0:self.image_block_size, :]
+        # Pass through the output layers to get the right number of elements
+        mods = self.adaLN_mlp(t).unsqueeze(1).chunk(2, dim=2)
+        x = modulate(self.final_norm(x), mods[0], mods[1])
+        x = self.final_linear(x)
+        # Convert the output back into a 2D image
+        x = x.reshape(shape=(x.shape[0], self.patches_per_side, self.patches_per_side, self.patch_size, self.patch_size,
+                             self.input_channels))
+        x = torch.einsum('nhwpqc->nchpwq', x)
+        x = x.reshape(shape=(x.shape[0], self.input_channels, self.image_size, self.image_size))
         return x
 
 
