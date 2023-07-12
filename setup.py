@@ -6,16 +6,16 @@
 from setuptools import find_packages, setup
 
 install_requires = [
-    'mosaicml>=0.14.1,<0.15',
+    'mosaicml',
     'mosaicml-streaming>=0.4.0,<1.0',
     'hydra-core>=1.2',
     'hydra-colorlog>=1.1.0',
-    'diffusers[torch]==0.16.0',
-    'transformers[torch]==4.29.2',
+    'diffusers[torch]',
+    'transformers[torch]',
     'wandb==0.15.4',
-    'xformers==0.0.16',
-    'triton==2.0.0',
-    'torchmetrics[image]==0.11.3',
+    'xformers',
+    'triton',
+    'torchmetrics[image]',
 ]
 
 extras_require = {}
