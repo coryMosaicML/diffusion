@@ -38,6 +38,7 @@ def stable_diffusion_2(
     encode_latents_in_fp16: bool = True,
     fsdp: bool = True,
     width_multiplier: float = 1.0,
+    layers_per_block: int = 2,
 ):
     """Stable diffusion v2 training setup.
 
@@ -62,6 +63,7 @@ def stable_diffusion_2(
         encode_latents_in_fp16 (bool, optional): Whether to encode latents in fp16. Defaults to True.
         fsdp (bool, optional): Whether to use FSDP. Defaults to True.
         width_multiplier (float): Multiplier for the network width. Ignored if using the pretrained model. Defaults to 1.0.
+        layers_per_block (int): Number of layers per block. Ignored if using the pretrained model. Defaults to 2.
     """
     if train_metrics is None:
         train_metrics = [MeanSquaredError()]
@@ -95,7 +97,7 @@ def stable_diffusion_2(
             flip_sin_to_cos=True,
             freq_shift=0,
             in_channels=4,
-            layers_per_block=2,
+            layers_per_block=layers_per_block,
             mid_block_scale_factor=1,
             norm_eps=1e-05,
             norm_num_groups=factor,
@@ -116,15 +118,14 @@ def stable_diffusion_2(
 
     tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
     noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
-    inference_noise_scheduler = DDIMScheduler(
-                                    num_train_timesteps=noise_scheduler.config.num_train_timesteps,
-                                    beta_start=noise_scheduler.config.beta_start,
-                                    beta_end=noise_scheduler.config.beta_end,
-                                    beta_schedule=noise_scheduler.config.beta_schedule,
-                                    trained_betas=noise_scheduler.config.trained_betas,
-                                    clip_sample=noise_scheduler.config.clip_sample,
-                                    set_alpha_to_one=noise_scheduler.config.set_alpha_to_one,
-                                    prediction_type=prediction_type)
+    inference_noise_scheduler = DDIMScheduler(num_train_timesteps=noise_scheduler.config.num_train_timesteps,
+                                              beta_start=noise_scheduler.config.beta_start,
+                                              beta_end=noise_scheduler.config.beta_end,
+                                              beta_schedule=noise_scheduler.config.beta_schedule,
+                                              trained_betas=noise_scheduler.config.trained_betas,
+                                              clip_sample=noise_scheduler.config.clip_sample,
+                                              set_alpha_to_one=noise_scheduler.config.set_alpha_to_one,
+                                              prediction_type=prediction_type)
 
     model = StableDiffusion(
         unet=unet,
