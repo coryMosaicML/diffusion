@@ -156,6 +156,12 @@ class DiffusionTransformer(nn.Module):
         self.final_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
         self.final_linear = nn.Linear(self.num_features, self.input_channels * (self.patch_size**2))
         self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(self.num_features, 2 * self.num_features))
+        # Init the output layer to zero
+        nn.init.zeros_(self.final_linear.weight)
+        nn.init.zeros_(self.final_linear.bias)
+        # Init the modulations to zero. This will ensure the block acts as identity at initialization
+        nn.init.zeros_(self.adaLN_mlp[1].weight)
+        nn.init.zeros_(self.adaLN_mlp[1].bias)
 
     def forward(self, x, t, conditioning=None, mask=None):
         # Embed the timestep
