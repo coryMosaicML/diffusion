@@ -137,7 +137,7 @@ def load_checkpoint(args, eval_dataloader):
                                pretrained=pretrained,
                                encode_latents_in_fp16=False,
                                fsdp=False,
-                               width_multiplier=args.width
+                               width_multiplier=args.width,
                                layers_per_block=args.layers_per_block)
 
     # Load model
