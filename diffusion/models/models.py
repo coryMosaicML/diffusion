@@ -108,7 +108,11 @@ def stable_diffusion_2(
         # Can't fsdp wrap up_blocks or down_blocks because the forward pass calls length on these :-(
         unet.up_blocks._fsdp_wrap = False
         unet.down_blocks._fsdp_wrap = False
-
+        for block in unet.up_blocks:
+            block._fsdp_wrap = False
+        for block in unet.down_blocks:
+            block._fsdp_wrap = False
+            
     if encode_latents_in_fp16:
         vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae', torch_dtype=torch.float16)
         text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder', torch_dtype=torch.float16)
