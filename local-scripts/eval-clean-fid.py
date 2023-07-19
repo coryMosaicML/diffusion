@@ -42,6 +42,7 @@ def process_arguments(args):
                         help='guidance scale to evaluate at')
     parser.add_argument('--size', default=512, type=int, help='image size to evaluate at')
     parser.add_argument('--width', default=1.0, type=float, help='width parameter')
+    parser.add_argument('--layers_per_block', default=2, type=int, help='number of layers per block')
     parser.add_argument('--prediction_type', default='epsilon', type=str, help='prediction type to use')
     parser.add_argument('--clip_model',
                         default='openai/clip-vit-base-patch16',
@@ -136,7 +137,8 @@ def load_checkpoint(args, eval_dataloader):
                                pretrained=pretrained,
                                encode_latents_in_fp16=False,
                                fsdp=False,
-                               width_multiplier=args.width)
+                               width_multiplier=args.width
+                               layers_per_block=args.layers_per_block)
 
     # Load model
     Trainer(model=model, load_path=args.load_path, load_weights_only=True, eval_dataloader=eval_dataloader)
