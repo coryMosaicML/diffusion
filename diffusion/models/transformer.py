@@ -31,6 +31,9 @@ class SelfAttention(nn.Module):
         # Initialize all biases to zero
         nn.init.zeros_(self.qkv.bias)
         nn.init.zeros_(self.output_layer.bias)
+        # Init the standard deviation of the weights to 0.02
+        nn.init.normal_(self.qkv.weight, std=0.02)
+        nn.init.normal_(self.output_layer.weight, std=0.02)
 
     def forward(self, x, mask=None):
         # Get the shape of the input
@@ -81,6 +84,9 @@ class DiTBlock(nn.Module):
         # Initialize all biases to zero
         nn.init.zeros_(self.linear_1.bias)
         nn.init.zeros_(self.linear_2.bias)
+        # Initialize the linear layer weights to have a standard deviation of 0.02
+        nn.init.normal_(self.linear_1.weight, std=0.02)
+        nn.init.normal_(self.linear_2.weight, std=0.02)
         # Initialize the modulations to zero. This will ensure the block acts as identity at initialization
         nn.init.zeros_(self.adaLN_mlp[1].weight)
         nn.init.zeros_(self.adaLN_mlp[1].bias)
