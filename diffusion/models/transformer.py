@@ -17,6 +17,27 @@ def modulate(x, shift, scale):
     return x * (1.0 + scale) + shift
 
 
+def timestep_embedding(timesteps, dim, max_period=10000):
+    """
+    Create sinusoidal timestep embeddings.
+
+    :param timesteps: a 1-D Tensor of N indices, one per batch element.
+                      These may be fractional.
+    :param dim: the dimension of the output.
+    :param max_period: controls the minimum frequency of the embeddings.
+    :return: an [N x dim] Tensor of positional embeddings.
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+    ).to(device=timesteps.device)
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
+
 class SelfAttention(nn.Module):
     """Standard self attention layer that supports masking"""
 
@@ -133,7 +154,7 @@ class DiffusionTransformer(nn.Module):
         self.expansion_factor = expansion_factor
 
         # Embedding layer for the timesteps
-        self.timestep_embedding = nn.Embedding(self.num_timesteps, self.num_features)
+        #self.timestep_embedding = nn.Embedding(self.num_timesteps, self.num_features)
         # Patching layer for images
         self.patch_embedding = nn.Conv2d(3, self.num_features, self.patch_size, stride=self.patch_size)
         # Init the patch embedding so it will add with positional embedding and respect scaling
@@ -171,7 +192,7 @@ class DiffusionTransformer(nn.Module):
 
     def forward(self, x, t, conditioning=None, mask=None):
         # Embed the timestep
-        t = self.timestep_embedding(t)
+        t = timestep_embedding(t, self.num_features)
         # Patchify the image
         x = self.patch_embedding(x)
         # Flatten the image
