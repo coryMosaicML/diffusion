@@ -203,6 +203,7 @@ class ComposerDiffusionTransformer(ComposerModel):
                  tokenizer,
                  noise_scheduler,
                  inference_noise_scheduler,
+                 prediction_type: str = 'epsilon',
                  loss_fn=F.mse_loss,
                  train_metrics: Optional[List] = None,
                  val_metrics: Optional[List] = None,
@@ -216,6 +217,9 @@ class ComposerDiffusionTransformer(ComposerModel):
         self.model = model
         self.noise_scheduler = noise_scheduler
         self.loss_fn = loss_fn
+        self.prediction_type = prediction_type.lower()
+        if self.prediction_type not in ['sample', 'epsilon', 'v_prediction']:
+            raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
         self.val_seed = val_seed
         self.image_key = image_key
         self.fsdp = fsdp
@@ -278,9 +282,18 @@ class ComposerDiffusionTransformer(ComposerModel):
         # Add noise to the inputs (forward diffusion)
         noise = torch.randn_like(inputs)
         noised_inputs = self.noise_scheduler.add_noise(inputs, noise, timesteps)
-
+        # Generate the targets
+        if self.prediction_type == 'epsilon':
+            targets = noise
+        elif self.prediction_type == 'sample':
+            targets = inputs
+        elif self.prediction_type == 'v_prediction':
+            targets = self.noise_scheduler.get_velocity(inputs, noise, timesteps)
+        else:
+            raise ValueError(
+                f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
         # Forward through the model
-        return self.model(noised_inputs, timesteps, conditioning=conditioning), noise, timesteps
+        return self.model(noised_inputs, timesteps, conditioning=conditioning), targets, timesteps
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
@@ -292,7 +305,7 @@ class ComposerDiffusionTransformer(ComposerModel):
         if outputs is not None:
             return outputs
         # Get unet outputs
-        model_out, noise, timesteps = self.forward(batch)
+        model_out, targets, timesteps = self.forward(batch)
         # Sample images from the prompts in the batch
         prompts = batch[self.text_key]
         height, width = batch[self.image_key].shape[-2], batch[self.image_key].shape[-1]
@@ -305,7 +318,7 @@ class ComposerDiffusionTransformer(ComposerModel):
                                        seed=self.val_seed,
                                        progress_bar=False)
             generated_images[guidance_scale] = gen_images
-        return model_out, noise, timesteps, generated_images
+        return model_out, targets, timesteps, generated_images
 
     def get_metrics(self, is_train: bool = False):
         if is_train:
@@ -422,17 +435,17 @@ class ComposerDiffusionTransformer(ComposerModel):
                 model_input = inputs
 
             model_input = self.inference_scheduler.scale_model_input(model_input, t)
-            # predict the noise residual
+            # Model prediction
             t_tensor = torch.ones(model_input.shape[0], dtype=torch.int64, device=device) * t
-            noise_pred = self.model(model_input, t_tensor, conditioning=text_embeddings)
+            pred = self.model(model_input, t_tensor, conditioning=text_embeddings)
 
             if do_classifier_free_guidance:
                 # perform guidance
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                pred_uncond, pred_text = pred.chunk(2)
+                pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            inputs = self.inference_scheduler.step(noise_pred, t, inputs, generator=rng_generator).prev_sample
+            inputs = self.inference_scheduler.step(pred, t, inputs, generator=rng_generator).prev_sample
 
         # We now decode back into an image
         image = (inputs / 2 + 0.5).clamp(0, 1)

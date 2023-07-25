@@ -247,6 +247,7 @@ def diffusion_transformer(
     num_layers: int = 3,
     image_size: int = 256,
     patch_size: int = 16,
+    prediction_type: str = 'epsilon',
     train_metrics: Optional[List] = None,
     val_metrics: Optional[List] = None,
     val_guidance_scales: Optional[List] = None,
@@ -281,13 +282,21 @@ def diffusion_transformer(
     text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
     tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
     noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
-    inference_noise_scheduler = DDIMScheduler.from_pretrained(model_name, subfolder='scheduler')
+    inference_noise_scheduler = DDIMScheduler(num_train_timesteps=noise_scheduler.config.num_train_timesteps,
+                                              beta_start=noise_scheduler.config.beta_start,
+                                              beta_end=noise_scheduler.config.beta_end,
+                                              beta_schedule=noise_scheduler.config.beta_schedule,
+                                              trained_betas=noise_scheduler.config.trained_betas,
+                                              clip_sample=noise_scheduler.config.clip_sample,
+                                              set_alpha_to_one=noise_scheduler.config.set_alpha_to_one,
+                                              prediction_type=prediction_type)
 
     model = ComposerDiffusionTransformer(model=dit_model,
                                          text_encoder=text_encoder,
                                          tokenizer=tokenizer,
                                          noise_scheduler=noise_scheduler,
                                          inference_noise_scheduler=inference_noise_scheduler,
+                                         prediction_type=prediction_type,
                                          train_metrics=train_metrics,
                                          val_metrics=val_metrics,
                                          val_seed=1138,
