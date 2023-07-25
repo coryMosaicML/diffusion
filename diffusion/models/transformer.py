@@ -28,9 +28,8 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     :return: an [N x dim] Tensor of positional embeddings.
     """
     half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-    ).to(device=timesteps.device)
+    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) /
+                      half).to(device=timesteps.device)
     args = timesteps[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
@@ -171,9 +170,9 @@ class DiffusionTransformer(nn.Module):
         self.patches_per_side = self.image_size // self.patch_size
         self.image_block_size = (self.image_size // self.patch_size)**2
         block_size = self.image_block_size + self.cond_timesteps
-        self.position_embedding = nn.Embedding(block_size, self.num_features)
+        #self.position_embedding = nn.Embedding(block_size, self.num_features)
         # Init the position embedding so it will add with patch embedding and conditioning embedding
-        self.position_embedding.weight.data /= math.sqrt(2.0)
+        #self.position_embedding.weight.data /= math.sqrt(2.0)
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
             DiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
@@ -202,8 +201,10 @@ class DiffusionTransformer(nn.Module):
         # Concatenate the image and the conditioning
         x = torch.cat([x, c], dim=1)  # (B, T+I, C)
         # Add the position embedding
-        positions = torch.arange(x.size(1), device=x.device).unsqueeze(0)  # (1, T+I)
-        position_embeddings = self.position_embedding(positions)  # (1, T+I, C)
+        #positions = torch.arange(x.size(1), device=x.device).unsqueeze(0)  # (1, T+I)
+        #position_embeddings = self.position_embedding(positions)  # (1, T+I, C)
+        positions = torch.arange(x.size(1), device=x.device)  # (1, T+I)
+        position_embeddings = timestep_embedding(positions, self.num_features)  # (1, T+I, C)
         x = x + position_embeddings  # (B, T+I, C)
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
