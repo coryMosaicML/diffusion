@@ -40,6 +40,7 @@ class LogDiffusionImages(Callback):
                  guidance_scale: Optional[float] = 0.0,
                  text_key: Optional[str] = 'captions',
                  tokenized_prompts: Optional[torch.LongTensor] = None,
+                 mask: Optional[torch.Tensor] = None,
                  seed: Optional[int] = 1138):
         self.prompts = prompts
         self.size = size
@@ -48,6 +49,7 @@ class LogDiffusionImages(Callback):
         self.text_key = text_key
         self.seed = seed
         self.tokenized_prompts = tokenized_prompts
+        self.mask = mask
 
     def eval_batch_end(self, state: State, logger: Logger):
         # Only log once per eval epoch
@@ -60,18 +62,19 @@ class LogDiffusionImages(Callback):
                 model = state.model
 
             if self.tokenized_prompts is None:
-                tokenized_prompts = [
-                    model.tokenizer(p, padding='max_length', truncation=True,
-                                    return_tensors='pt')['input_ids']  # type: ignore
-                    for p in self.prompts
-                ]
+                tokenized = [model.tokenizer(p, padding='max_length', truncation=True, return_tensors='pt') for p in self.prompts]
+                tokenized_prompts = [t['input_ids']  for t in tokenized]
+                attention_mask = [t['attention_mask'] for t in tokenized]
                 self.tokenized_prompts = torch.cat(tokenized_prompts)
+                self.mask = torch.cat(attention_mask).bool()
             self.tokenized_prompts = self.tokenized_prompts.to(state.batch[self.text_key].device)
+            self.mask = self.mask.to(state.batch[self.text_key].device)
 
             # Generate images
             with get_precision_context(state.precision):
                 gen_images = model.generate(
                     tokenized_prompts=self.tokenized_prompts,  # type: ignore
+                    mask=self.mask,
                     height=self.size,
                     width=self.size,
                     guidance_scale=self.guidance_scale,

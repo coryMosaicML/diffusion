@@ -66,15 +66,8 @@ class SelfAttention(nn.Module):
         q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
-        # Calculate the qk product. Don't forget to scale!
-        qk = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(k.size(-1))  # (B, num_heads, T, T)
-        # Apply the mask. Elements to be ignored should have a value of -inf.
-        if mask is not None:
-            qk = qk.masked_fill(mask == 0, float('-inf'))
-        # Apply the softmax.
-        attention_weights = torch.softmax(qk, dim=-1)  # (B, num_heads, T, T)
-        # Apply the attention weights to the values.
-        attention_out = torch.matmul(attention_weights, v)  # (B, num_heads, T, C // num_heads)
+        # Native torch attention
+        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         # Swap the sequence length and the head dimension back and get rid of num_heads.
         attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
         # Final linear layer to get the output
@@ -196,10 +189,18 @@ class DiffusionTransformer(nn.Module):
         x = self.patch_embedding(x)
         # Flatten the image
         x = x.flatten(2).transpose(1, 2)  # (B, I, C)
+        if mask is not None:
+            # Create the attention mask (True for image tokens, True/False for conditioning tokens)
+            image_mask = torch.ones((x.shape[0], x.shape[1]), device=x.device).bool()  # (I)
+            mask = torch.cat([mask, image_mask], dim=1)  # (B, T+I)
+            # Make the attention mask a square tensor (Expecting (B, T+I, T+I))
+            mask = mask.unsqueeze(1).repeat(1, mask.shape[1], 1)  # (B, T+I, T+I)
+            # Repeat the same mask for each attention head
+            mask = mask.unsqueeze(1).repeat(1, self.num_heads, 1, 1)  # (B, H, T+I, T+I)
         # Embed the conditioning
         c = self.conditioning_embedding(conditioning)  # (B, T, C)
         # Concatenate the image and the conditioning
-        x = torch.cat([x, c], dim=1)  # (B, T+I, C)
+        x = torch.cat([c, x], dim=1)  # (B, T+I, C)
         # Add the position embedding
         #positions = torch.arange(x.size(1), device=x.device).unsqueeze(0)  # (1, T+I)
         #position_embeddings = self.position_embedding(positions)  # (1, T+I, C)
@@ -210,7 +211,7 @@ class DiffusionTransformer(nn.Module):
         for block in self.transformer_blocks:
             x = block(x, t, mask=mask)
         # Throw away the conditioning tokens
-        x = x[:, 0:self.image_block_size, :]
+        x = x[:, -self.image_block_size:, :]
         # Pass through the output layers to get the right number of elements
         mods = self.adaLN_mlp(t).unsqueeze(1).chunk(2, dim=2)
         x = modulate(self.final_norm(x), mods[0], mods[1])
@@ -303,6 +304,10 @@ class ComposerDiffusionTransformer(ComposerModel):
 
     def forward(self, batch):
         inputs, conditioning = batch[self.image_key], batch[self.text_key]
+        if 'attention_mask' in batch:
+            attention_mask = batch['attention_mask'].bool()
+        else:
+            attention_mask = None
         conditioning = conditioning.view(-1, conditioning.shape[-1])
         conditioning = self.text_encoder(conditioning)[0]
         # Sample the diffusion timesteps
@@ -321,7 +326,7 @@ class ComposerDiffusionTransformer(ComposerModel):
             raise ValueError(
                 f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
         # Forward through the model
-        return self.model(noised_inputs, timesteps, conditioning=conditioning), targets, timesteps
+        return self.model(noised_inputs, timesteps, conditioning=conditioning, mask=attention_mask), targets, timesteps
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
@@ -403,6 +408,7 @@ class ComposerDiffusionTransformer(ComposerModel):
         prompt: Optional[list] = None,
         negative_prompt: Optional[list] = None,
         tokenized_prompts: Optional[torch.LongTensor] = None,
+        mask: Optional[torch.Tensor] = None,
         tokenized_negative_prompts: Optional[torch.LongTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -441,6 +447,11 @@ class ComposerDiffusionTransformer(ComposerModel):
             negative_prompt = negative_prompt or ([''] * (batch_size // num_images_per_prompt))  # type: ignore
             unconditional_embeddings = self._prepare_text_embeddings(negative_prompt, tokenized_negative_prompts,
                                                                      negative_prompt_embeds, num_images_per_prompt)
+            # Make the negative mask by copying the mask for the postive prompts and setting it to false
+            if mask is not None:
+                negative_mask = mask.clone()
+                negative_mask.fill_(False)
+                mask = torch.cat([negative_mask, mask], dim=0)
             # concat uncond + prompt
             text_embeddings = torch.cat([unconditional_embeddings, text_embeddings])
 
@@ -465,7 +476,7 @@ class ComposerDiffusionTransformer(ComposerModel):
             model_input = self.inference_scheduler.scale_model_input(model_input, t)
             # Model prediction
             t_tensor = torch.ones(model_input.shape[0], dtype=torch.int64, device=device) * t
-            pred = self.model(model_input, t_tensor, conditioning=text_embeddings)
+            pred = self.model(model_input, t_tensor, conditioning=text_embeddings, mask=mask)
 
             if do_classifier_free_guidance:
                 # perform guidance
