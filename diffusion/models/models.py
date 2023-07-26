@@ -15,6 +15,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, PretrainedConfig
 
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
+from diffusion.models.uvit import UViT, ComposerUViT
 from diffusion.models.transformer import ComposerDiffusionTransformer, DiffusionTransformer
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
 
@@ -305,6 +306,75 @@ def diffusion_transformer(
                                          image_key='image',
                                          text_key='captions',
                                          fsdp=fsdp)
+
+    if torch.cuda.is_available():
+        model = DeviceGPU().module_to_device(model)
+    return model
+
+
+def build_uvit(
+    model_name: str = 'stabilityai/stable-diffusion-2-base',
+    num_features: int = 1024,
+    num_heads: int = 16,
+    num_layers: int = 3,
+    image_size: int = 256,
+    patch_size: int = 16,
+    prediction_type: str = 'epsilon',
+    train_metrics: Optional[List] = None,
+    val_metrics: Optional[List] = None,
+    val_guidance_scales: Optional[List] = None,
+    val_seed: int = 1138,
+    loss_bins: Optional[List] = None,
+    fsdp: bool = True,
+):
+    if train_metrics is None:
+        train_metrics = [MeanSquaredError()]
+    if val_metrics is None:
+        val_metrics = [MeanSquaredError(), FrechetInceptionDistance(normalize=True)]
+    if val_guidance_scales is None:
+        val_guidance_scales = [1.0, 3.0, 7.0]
+    if loss_bins is None:
+        loss_bins = [(0, 1)]
+    # Fix a bug where CLIPScore requires grad
+    for metric in val_metrics:
+        if isinstance(metric, CLIPScore):
+            metric.requires_grad_(False)
+
+    uvit_model =  UViT(img_size=image_size,
+                       patch_size=patch_size,
+                       in_chans=3,
+                       embed_dim=num_features,
+                       depth=num_layers,
+                       num_heads=num_heads,
+                       clip_dim=1024,
+                       num_clip_token=77)
+
+    text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
+    tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
+    noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
+    inference_noise_scheduler = DDIMScheduler(num_train_timesteps=noise_scheduler.config.num_train_timesteps,
+                                              beta_start=noise_scheduler.config.beta_start,
+                                              beta_end=noise_scheduler.config.beta_end,
+                                              beta_schedule=noise_scheduler.config.beta_schedule,
+                                              trained_betas=noise_scheduler.config.trained_betas,
+                                              clip_sample=noise_scheduler.config.clip_sample,
+                                              set_alpha_to_one=noise_scheduler.config.set_alpha_to_one,
+                                              prediction_type=prediction_type)
+
+    model = ComposerUViT(model=uvit_model,
+                         text_encoder=text_encoder,
+                         tokenizer=tokenizer,
+                         noise_scheduler=noise_scheduler,
+                         inference_noise_scheduler=inference_noise_scheduler,
+                         prediction_type=prediction_type,
+                         train_metrics=train_metrics,
+                         val_metrics=val_metrics,
+                         val_seed=1138,
+                         val_guidance_scales=val_guidance_scales,
+                         loss_bins=loss_bins,
+                         image_key='image',
+                         text_key='captions',
+                         fsdp=fsdp)
 
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
