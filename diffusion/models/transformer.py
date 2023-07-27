@@ -46,6 +46,9 @@ class SelfAttention(nn.Module):
         self.num_heads = num_heads
         # Linear layer to get q, k, and v
         self.qkv = nn.Linear(self.num_features, 3 * self.num_features)
+        # QK layernorms
+        #self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
+        #self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
         # Linear layer to get the output
         self.output_layer = nn.Linear(self.num_features, self.num_features)
         # Initialize all biases to zero
@@ -60,6 +63,8 @@ class SelfAttention(nn.Module):
         B, T, C = x.size()
         # Calculate the query, key, and values all in one go
         q, k, v = self.qkv(x).chunk(3, dim=-1)
+        #q = self.q_norm(q)
+        #k = self.k_norm(k)
         # After this, q, k, and v will have shape (B, T, C)
         # Reshape the query, key, and values for multi-head attention
         # Also want to swap the sequence length and the head dimension for later matmuls
@@ -67,7 +72,18 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
         # Native torch attention
-        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        #attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask) # (B, H, T, C/H)
+
+        # Calculate the qk product. Don't forget to scale!
+        qk = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(k.size(-1))  # (B, num_heads, T, T)
+        # Apply the mask. Elements to be ignored should have a value of -inf.
+        if mask is not None:
+            qk = qk.masked_fill(mask == False, float('-inf'))
+        # Apply the softmax.
+        attention_weights = torch.softmax(qk, dim=-1)  # (B, num_heads, T, T)
+        # Apply the attention weights to the values.
+        attention_out = torch.matmul(attention_weights, v)  # (B, num_heads, T, C // num_heads)
+
         # Swap the sequence length and the head dimension back and get rid of num_heads.
         attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
         # Final linear layer to get the output
@@ -194,7 +210,9 @@ class DiffusionTransformer(nn.Module):
             image_mask = torch.ones((x.shape[0], x.shape[1]), device=x.device).bool()  # (B, I)
             mask = torch.cat([mask, image_mask], dim=1)  # (B, T+I)
             # Make the attention mask a square tensor (Expecting (B, T+I, T+I))
-            mask = mask.unsqueeze(2) == mask.unsqueeze(1)  # (B, T+I, T+I)
+            mask = mask.unsqueeze(2) & mask.unsqueeze(1)  # (B, T+I, T+I)
+            eye = torch.eye(mask.shape[1], dtype=torch.bool, device=mask.device).unsqueeze(0)
+            mask = mask | eye  # (B, T+I, T+I)
             # Repeat the same mask for each attention head
             mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # (B, H, T+I, T+I)
         # Embed the conditioning
@@ -304,8 +322,8 @@ class ComposerDiffusionTransformer(ComposerModel):
 
     def forward(self, batch):
         inputs, conditioning = batch[self.image_key], batch[self.text_key]
-        if 'attention_mask' in batch:
-            attention_mask = batch['attention_mask'].bool()
+        if 'mask' in batch:
+            attention_mask = batch['mask'].bool()
         else:
             attention_mask = None
         conditioning = conditioning.view(-1, conditioning.shape[-1])

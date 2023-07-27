@@ -94,8 +94,9 @@ class StreamingImageCaptionDataset(StreamingDataset):
             if isinstance(caption, List) and self.caption_selection == 'random':
                 caption = random.sample(caption, k=1)[0]
 
-        tokenized = self.tokenizer(caption, padding='max_length', truncation=True, return_tensors='pt')
-        return {'image': img, 'captions': tokenized['input_ids'][0], 'attention_mask': tokenized['attention_mask'][0]}
+        tokenized = self.tokenizer(caption, padding='max_length', truncation=True, return_tensors='pt', return_special_tokens_mask=True)
+        mask = tokenized['attention_mask'][0] & ~tokenized['special_tokens_mask'][0]
+        return {'image': img, 'captions': tokenized['input_ids'][0], 'mask': mask}
 
 
 def build_streaming_image_caption_dataloader(

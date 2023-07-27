@@ -62,11 +62,11 @@ class LogDiffusionImages(Callback):
                 model = state.model
 
             if self.tokenized_prompts is None:
-                tokenized = [model.tokenizer(p, padding='max_length', truncation=True, return_tensors='pt') for p in self.prompts]
+                tokenized = [model.tokenizer(p, padding='max_length', truncation=True, return_tensors='pt', return_special_tokens_mask=True) for p in self.prompts]
                 tokenized_prompts = [t['input_ids']  for t in tokenized]
-                attention_mask = [t['attention_mask'] for t in tokenized]
+                mask = [t['attention_mask'] & ~t['special_tokens_mask'] for t in tokenized]
                 self.tokenized_prompts = torch.cat(tokenized_prompts)
-                self.mask = torch.cat(attention_mask).bool()
+                self.mask = torch.cat(mask).bool()
             self.tokenized_prompts = self.tokenized_prompts.to(state.batch[self.text_key].device)
             self.mask = self.mask.to(state.batch[self.text_key].device)
 
