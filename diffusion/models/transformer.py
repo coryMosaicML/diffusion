@@ -194,7 +194,7 @@ class DiffusionTransformer(nn.Module):
             image_mask = torch.ones((x.shape[0], x.shape[1]), device=x.device).bool()  # (B, I)
             mask = torch.cat([mask, image_mask], dim=1)  # (B, T+I)
             # Make the attention mask a square tensor (Expecting (B, T+I, T+I))
-            mask = mask.unsqueeze(2) & mask.unsqueeze(1)  # (B, T+I, T+I)
+            mask = mask.unsqueeze(2) == mask.unsqueeze(1)  # (B, T+I, T+I)
             # Repeat the same mask for each attention head
             mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # (B, H, T+I, T+I)
         # Embed the conditioning
