@@ -191,12 +191,12 @@ class DiffusionTransformer(nn.Module):
         x = x.flatten(2).transpose(1, 2)  # (B, I, C)
         if mask is not None:
             # Create the attention mask (True for image tokens, True/False for conditioning tokens)
-            image_mask = torch.ones((x.shape[0], x.shape[1]), device=x.device).bool()  # (I)
+            image_mask = torch.ones((x.shape[0], x.shape[1]), device=x.device).bool()  # (B, I)
             mask = torch.cat([mask, image_mask], dim=1)  # (B, T+I)
             # Make the attention mask a square tensor (Expecting (B, T+I, T+I))
-            mask = mask.unsqueeze(1).repeat(1, mask.shape[1], 1)  # (B, T+I, T+I)
+            mask = mask.unsqueeze(2) & mask.unsqueeze(1)  # (B, T+I, T+I)
             # Repeat the same mask for each attention head
-            mask = mask.unsqueeze(1).repeat(1, self.num_heads, 1, 1)  # (B, H, T+I, T+I)
+            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # (B, H, T+I, T+I)
         # Embed the conditioning
         c = self.conditioning_embedding(conditioning)  # (B, T, C)
         # Concatenate the image and the conditioning
