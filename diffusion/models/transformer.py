@@ -47,8 +47,8 @@ class SelfAttention(nn.Module):
         # Linear layer to get q, k, and v
         self.qkv = nn.Linear(self.num_features, 3 * self.num_features)
         # QK layernorms
-        #self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
-        #self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
+        self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
+        self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
         # Linear layer to get the output
         self.output_layer = nn.Linear(self.num_features, self.num_features)
         # Initialize all biases to zero
@@ -63,8 +63,8 @@ class SelfAttention(nn.Module):
         B, T, C = x.size()
         # Calculate the query, key, and values all in one go
         q, k, v = self.qkv(x).chunk(3, dim=-1)
-        #q = self.q_norm(q)
-        #k = self.k_norm(k)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         # After this, q, k, and v will have shape (B, T, C)
         # Reshape the query, key, and values for multi-head attention
         # Also want to swap the sequence length and the head dimension for later matmuls
