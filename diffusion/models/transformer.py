@@ -164,7 +164,7 @@ class DiffusionTransformer(nn.Module):
         # Embedding layer for the timesteps
         #self.timestep_embedding = nn.Embedding(self.num_timesteps, self.num_features)
         # Patching layer for images
-        self.patch_embedding = nn.Conv2d(3, self.num_features, self.patch_size, stride=self.patch_size)
+        self.patch_embedding = nn.Conv2d(self.input_channels, self.num_features, self.patch_size, stride=self.patch_size)
         # Init the patch embedding so it will add with positional embedding and respect scaling
         nn.init.kaiming_uniform_(self.patch_embedding.weight, nonlinearity='linear')
         nn.init.zeros_(self.patch_embedding.bias)
@@ -543,3 +543,302 @@ def _check_prompt_lenths(prompt, negative_prompt):
 def _check_prompt_given(prompt, tokenized_prompts, prompt_embeds):
     if prompt is None and tokenized_prompts is None and prompt_embeds is None:
         raise ValueError('Must provide one of `prompt`, `tokenized_prompts`, or `prompt_embeds`')
+
+
+class ComposerLatentDiffusionTransformer(ComposerModel):
+
+    def __init__(self,
+                 model,
+                 image_encoder,
+                 text_encoder,
+                 tokenizer,
+                 noise_scheduler,
+                 inference_noise_scheduler,
+                 prediction_type: str = 'epsilon',
+                 loss_fn=F.mse_loss,
+                 train_metrics: Optional[List] = None,
+                 val_metrics: Optional[List] = None,
+                 val_seed: int = 1138,
+                 val_guidance_scales: Optional[List] = None,
+                 loss_bins: Optional[List] = None,
+                 image_key: str = 'image',
+                 text_key: str = 'captions',
+                 fsdp: bool = True):
+        super().__init__()
+        self.model = model
+        self.noise_scheduler = noise_scheduler
+        self.loss_fn = loss_fn
+        self.prediction_type = prediction_type.lower()
+        if self.prediction_type not in ['sample', 'epsilon', 'v_prediction']:
+            raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
+        self.val_seed = val_seed
+        self.image_key = image_key
+        self.fsdp = fsdp
+
+        # setup metrics
+        if train_metrics is None:
+            self.train_metrics = [MeanSquaredError()]
+        else:
+            self.train_metrics = train_metrics
+        if val_metrics is None:
+            val_metrics = [MeanSquaredError()]
+        if val_guidance_scales is None:
+            val_guidance_scales = [0.0]
+        if loss_bins is None:
+            loss_bins = [(0, 1)]
+        # Create new val metrics for each guidance weight and each loss bin
+        self.val_guidance_scales = val_guidance_scales
+
+        # bin metrics
+        self.val_metrics = {}
+        metrics_to_sweep = ['FrechetInceptionDistance', 'InceptionScore', 'CLIPScore']
+        for metric in val_metrics:
+            if metric.__class__.__name__ in metrics_to_sweep:
+                for scale in val_guidance_scales:
+                    new_metric = type(metric)(**vars(metric))
+                    # WARNING: ugly hack...
+                    new_metric.guidance_scale = scale
+                    scale_str = str(scale).replace('.', 'p')
+                    self.val_metrics[f'{metric.__class__.__name__}-scale-{scale_str}'] = new_metric
+            elif isinstance(metric, MeanSquaredError):
+                for bin in loss_bins:
+                    new_metric = type(metric)(**vars(metric))
+                    # WARNING: ugly hack...
+                    new_metric.loss_bin = bin
+                    self.val_metrics[f'{metric.__class__.__name__}-bin-{bin[0]}-to-{bin[1]}'.replace('.',
+                                                                                                     'p')] = new_metric
+            else:
+                self.val_metrics[metric.__class__.__name__] = metric
+        # Add a mse metric for the full loss
+        self.val_metrics['MeanSquaredError'] = MeanSquaredError()
+
+        self.image_encoder = image_encoder
+        self.text_encoder = text_encoder
+        self.tokenizer = tokenizer
+        self.inference_scheduler = inference_noise_scheduler
+        self.text_key = text_key
+        # freeze encoders during diffusion training
+        self.image_encoder.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
+        # Encode latents in half precision
+        self.text_encoder.half()
+        self.image_encoder.half()
+        if fsdp:
+            # only wrap models we are training
+            self.image_encoder._fsdp_wrap = False
+            self.text_encoder._fsdp_wrap = False
+            self.model._fsdp_wrap = True
+
+    def forward(self, batch):
+        inputs, conditioning = batch[self.image_key], batch[self.text_key]
+        if 'mask' in batch:
+            attention_mask = batch['mask'].bool()
+        else:
+            attention_mask = None
+        conditioning = conditioning.view(-1, conditioning.shape[-1])
+        with torch.cuda.amp.autocast(enabled=False):
+            conditioning = self.text_encoder(conditioning)[0]
+            # Encode the images
+            inputs = self.image_encoder.encode(inputs.half())['latent_dist'].sample().data
+        inputs *= 0.18215 # Magic scaling number
+        # Sample the diffusion timesteps
+        timesteps = torch.randint(0, len(self.noise_scheduler), (inputs.shape[0],), device=inputs.device)
+        # Add noise to the inputs (forward diffusion)
+        noise = torch.randn_like(inputs)
+        noised_inputs = self.noise_scheduler.add_noise(inputs, noise, timesteps)
+        # Generate the targets
+        if self.prediction_type == 'epsilon':
+            targets = noise
+        elif self.prediction_type == 'sample':
+            targets = inputs
+        elif self.prediction_type == 'v_prediction':
+            targets = self.noise_scheduler.get_velocity(inputs, noise, timesteps)
+        else:
+            raise ValueError(
+                f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
+        # Forward through the model
+        return self.model(noised_inputs, timesteps, conditioning=conditioning, mask=attention_mask), targets, timesteps
+
+    def loss(self, outputs, batch):
+        """Loss between unet output and added noise, typically mse."""
+        return self.loss_fn(outputs[0], outputs[1])
+
+    def eval_forward(self, batch, outputs=None):
+        """Computes model outputs as well as some samples."""
+        # Skip this if outputs have already been computed, e.g. during training
+        if outputs is not None:
+            return outputs
+        # Get unet outputs
+        model_out, targets, timesteps = self.forward(batch)
+        # Sample images from the prompts in the batch
+        prompts = batch[self.text_key]
+        height, width = batch[self.image_key].shape[-2], batch[self.image_key].shape[-1]
+        generated_images = {}
+        for guidance_scale in self.val_guidance_scales:
+            gen_images = self.generate(tokenized_prompts=prompts,
+                                       height=height,
+                                       width=width,
+                                       guidance_scale=guidance_scale,
+                                       seed=self.val_seed,
+                                       progress_bar=False)
+            generated_images[guidance_scale] = gen_images
+        return model_out, targets, timesteps, generated_images
+
+    def get_metrics(self, is_train: bool = False):
+        if is_train:
+            metrics = self.train_metrics
+        else:
+            metrics = self.val_metrics
+
+        if isinstance(metrics, Metric):
+            metrics_dict = {metrics.__class__.__name__: metrics}
+        elif isinstance(metrics, list):
+            metrics_dict = {metrics.__class__.__name__: metric for metric in metrics}
+        else:
+            metrics_dict = {}
+            for name, metric in metrics.items():
+                assert isinstance(metric, Metric)
+                metrics_dict[name] = metric
+
+        return metrics_dict
+
+    def update_metric(self, batch, outputs, metric):
+        # If A MSE metric is associated with a loss bin, update the metric for the bin
+        # Othewise, update the metric for the full loss
+        if isinstance(metric, MeanSquaredError) and hasattr(metric, 'loss_bin'):
+            # Get the loss bin from the metric
+            loss_bin = metric.loss_bin
+            # Get the loss for timesteps in the bin
+            T_max = self.noise_scheduler.num_train_timesteps
+            # Get the indices corresponding to timesteps in the bin
+            bin_indices = torch.where(
+                (outputs[2] >= loss_bin[0] * T_max) & (outputs[2] < loss_bin[1] * T_max))  # type: ignore
+            # Update the metric for items in the bin
+            metric.update(outputs[0][bin_indices], outputs[1][bin_indices])
+        elif isinstance(metric, MeanSquaredError):
+            metric.update(outputs[0], outputs[1])
+        # FID metrics should be updated with the generated images at the desired guidance scale
+        elif metric.__class__.__name__ == 'FrechetInceptionDistance':
+            metric.update(batch[self.image_key], real=True)
+            metric.update(outputs[3][metric.guidance_scale], real=False)
+        # IS metrics should be updated with the generated images at the desired guidance scale
+        elif metric.__class__.__name__ == 'InceptionScore':
+            metric.update(outputs[3][metric.guidance_scale])
+        # CLIP metrics should be updated with the generated images at the desired guidance scale
+        elif metric.__class__.__name__ == 'CLIPScore':
+            # Convert the captions to a list of strings
+            captions = [self.tokenizer.decode(caption, skip_special_tokens=True) for caption in batch[self.text_key]]
+            generated_images = (outputs[3][metric.guidance_scale] * 255).to(torch.uint8)
+            metric.update(generated_images, captions)
+        else:
+            metric.update(outputs[0], outputs[1])
+
+    @torch.no_grad()
+    def generate(
+        self,
+        prompt: Optional[list] = None,
+        negative_prompt: Optional[list] = None,
+        tokenized_prompts: Optional[torch.LongTensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        tokenized_negative_prompts: Optional[torch.LongTensor] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: Optional[int] = 50,
+        guidance_scale: Optional[float] = 3.0,
+        num_images_per_prompt: Optional[int] = 1,
+        seed: Optional[int] = None,
+        progress_bar: Optional[bool] = True,
+    ):
+        """Generates image from noise."""
+        _check_prompt_given(prompt, tokenized_prompts, prompt_embeds)
+        _check_prompt_lenths(prompt, negative_prompt)
+        _check_prompt_lenths(tokenized_prompts, tokenized_negative_prompts)
+        _check_prompt_lenths(prompt_embeds, negative_prompt_embeds)
+
+        # Create rng for the generation
+        device = next(self.model.parameters()).device
+        rng_generator = torch.Generator(device=device)
+        if seed:
+            rng_generator = rng_generator.manual_seed(seed)  # type: ignore
+
+        height = height or self.model.image_size
+        width = width or self.model.image_size
+        assert height is not None  # for type checking
+        assert width is not None  # for type checking
+
+        do_classifier_free_guidance = guidance_scale > 1.0  # type: ignore
+
+        text_embeddings = self._prepare_text_embeddings(prompt, tokenized_prompts, prompt_embeds, num_images_per_prompt)
+        batch_size = len(text_embeddings)  # len prompts * num_images_per_prompt
+        # classifier free guidance + negative prompts
+        # negative prompt is given in place of the unconditional input in classifier free guidance
+        if do_classifier_free_guidance:
+            negative_prompt = negative_prompt or ([''] * (batch_size // num_images_per_prompt))  # type: ignore
+            unconditional_embeddings = self._prepare_text_embeddings(negative_prompt, tokenized_negative_prompts,
+                                                                     negative_prompt_embeds, num_images_per_prompt)
+            # Make the negative mask by copying the mask for the postive prompts and setting it to false
+            if mask is not None:
+                negative_mask = mask.clone()
+                negative_mask.fill_(False)
+                mask = torch.cat([negative_mask, mask], dim=0)
+            # concat uncond + prompt
+            text_embeddings = torch.cat([unconditional_embeddings, text_embeddings])
+
+        # prepare for diffusion generation process
+        inputs = torch.randn(
+            (batch_size, self.model.input_channels, height//8, width//8),
+            device=device,
+            generator=rng_generator,
+        )
+
+        self.inference_scheduler.set_timesteps(num_inference_steps)
+        # scale the initial noise by the standard deviation required by the scheduler
+        inputs = inputs * self.inference_scheduler.init_noise_sigma
+
+        # backward diffusion process
+        for t in tqdm(self.inference_scheduler.timesteps, disable=not progress_bar):
+            if do_classifier_free_guidance:
+                model_input = torch.cat([inputs] * 2)
+            else:
+                model_input = inputs
+
+            model_input = self.inference_scheduler.scale_model_input(model_input, t)
+            # Model prediction
+            t_tensor = torch.ones(model_input.shape[0], dtype=torch.int64, device=device) * t
+            pred = self.model(model_input, t_tensor, conditioning=text_embeddings, mask=mask)
+
+            if do_classifier_free_guidance:
+                # perform guidance
+                pred_uncond, pred_text = pred.chunk(2)
+                pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
+
+            # compute the previous noisy sample x_t -> x_t-1
+            inputs = self.inference_scheduler.step(pred, t, inputs, generator=rng_generator).prev_sample
+
+        # We now decode back into an image
+        inputs = 1 / 0.18215 * inputs
+        inputs = self.image_encoder.decode(inputs).sample
+        image = (inputs / 2 + 0.5).clamp(0, 1)
+        return image.detach()  # (batch*num_images_per_prompt, channel, h, w)
+
+    def _prepare_text_embeddings(self, prompt, tokenized_prompts, prompt_embeds, num_images_per_prompt):
+        """Tokenizes and embeds prompts if needed, then duplicates embeddings to support multiple generations per prompt."""
+        device = self.text_encoder.device
+        if prompt_embeds is None:
+            if tokenized_prompts is None:
+                tokenized_prompts = self.tokenizer(prompt,
+                                                   padding='max_length',
+                                                   max_length=self.tokenizer.model_max_length,
+                                                   truncation=True,
+                                                   return_tensors='pt').input_ids
+            text_embeddings = self.text_encoder(tokenized_prompts.to(device))[0]  # type: ignore
+        else:
+            text_embeddings = prompt_embeds
+
+        # duplicate text embeddings for each generation per prompt
+        bs_embed, seq_len, _ = text_embeddings.shape
+        text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)  # type: ignore
+        text_embeddings = text_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        return text_embeddings
