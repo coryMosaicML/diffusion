@@ -157,6 +157,34 @@ class StableDiffusion(ComposerModel):
             self.vae._fsdp_wrap = False
             self.unet._fsdp_wrap = True
 
+    def _get_discrete_inputs_and_targets(self, latents):
+        timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
+        # Add noise to the inputs (forward diffusion)
+        noise = torch.randn_like(latents)
+        noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)     
+        if self.prediction_type == 'epsilon' and self.parameterization == 'discrete':
+            targets = noise
+        elif self.prediction_type == 'sample' and self.parameterization == 'discrete':
+            targets = latents
+        elif self.prediction_type == 'v_prediction' or self.parameterization == 'continuous':
+            targets = self.noise_scheduler.get_velocity(latents, noise, timesteps)
+        else:
+            raise ValueError(
+                f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
+        return noised_latents, targets, timesteps
+
+    def _get_continuous_inputs_and_targets(self, latents):
+        timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device)
+        # Add noise to the inputs (forward diffusion)
+        noise = torch.randn_like(latents)
+        phi = timesteps / len(self.noise_scheduler)
+        phi = phi.view(len(phi), *(1,) * (len(latents.shape) - 1))
+        noised_latents = torch.cos(phi) * latents + torch.sin(phi) * noise
+        # Generate the targets
+        # Continuous parameterization is always going to use v, and v is computed outside the scheduler
+        targets = torch.cos(phi) * noise - torch.sin(phi) * latents
+        return noised_latents, targets, timesteps
+
     def forward(self, batch):
         latents, conditioning = None, None
         # Use latents if specified and available. When specified, they might not exist during eval
@@ -179,36 +207,13 @@ class StableDiffusion(ComposerModel):
             # Magical scaling number (See https://github.com/huggingface/diffusers/issues/437#issuecomment-1241827515)
             latents *= 0.18215
 
-        # Sample the diffusion timesteps
+        # Prep inputs and get targets
         if self.parameterization == 'discrete':
-            timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
-            # Add noise to the inputs (forward diffusion)
-            noise = torch.randn_like(latents)
-            noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+            noised_latents, targets, timesteps = self._get_discrete_inputs_and_targets(latents)
         elif self.parameterization == 'continuous':
-            timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device)
-            # Add noise to the inputs (forward diffusion)
-            noise = torch.randn_like(latents)
-            phi = timesteps / len(self.noise_scheduler)
-            phi = phi.view(len(phi), *(1,) * (len(latents.shape) - 1))
-            noised_latents = torch.cos(phi) * latents + torch.sin(phi) * noise
+            noised_latents, targets, timesteps = self._get_continuous_inputs_and_targets(latents)
         else:
             raise ValueError(f'parameterization must be one of discrete or continuous. Got {self.parameterization}')
-
-        # Generate the targets
-        if self.prediction_type == 'epsilon' and self.parameterization == 'discrete':
-            targets = noise
-        elif self.prediction_type == 'sample' and self.parameterization == 'discrete':
-            targets = latents
-        elif self.prediction_type == 'v_prediction' or self.parameterization == 'continuous':
-            if self.parameterization == 'discrete':
-                targets = self.noise_scheduler.get_velocity(latents, noise, timesteps)
-            elif self.parameterization == 'continuous':
-                # Continuous parameterization is always going to use v, and v is computed outside the scheduler
-                targets = torch.cos(phi) * noise - torch.sin(phi) * latents
-        else:
-            raise ValueError(
-                f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
         # Forward through the model
         return self.unet(noised_latents, timesteps, conditioning)['sample'], targets, timesteps
 
