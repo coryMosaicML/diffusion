@@ -57,7 +57,6 @@ def train(config: DictConfig) -> None:
         eval_set = evaluators
 
     else:
-        dist.barrier()
         eval_set = hydra.utils.instantiate(config.dataset.eval_dataset,
                                            batch_size=config.dataset.eval_batch_size // dist.get_world_size())
 
@@ -110,7 +109,6 @@ def train(config: DictConfig) -> None:
 
     scheduler = hydra.utils.instantiate(config.scheduler)
 
-    dist.barrier()
     trainer: Trainer = hydra.utils.instantiate(
         config.trainer,
         train_dataloader=train_dataloader,
