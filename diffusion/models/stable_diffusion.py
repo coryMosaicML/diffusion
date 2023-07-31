@@ -186,7 +186,7 @@ class StableDiffusion(ComposerModel):
             noise = torch.randn_like(latents)
             noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
         elif self.parameterization == 'continuous':
-            timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device) * len(self.noise_scheduler)
+            timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device)
             # Add noise to the inputs (forward diffusion)
             noise = torch.randn_like(latents)
             phi = timesteps / len(self.noise_scheduler)
