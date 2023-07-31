@@ -15,7 +15,7 @@ from composer.core import Precision
 from composer.loggers import LoggerDestination
 from composer.utils import dist, reproducibility
 from omegaconf import DictConfig, OmegaConf
-
+import time
 
 def train(config: DictConfig) -> None:
     """Train a model.
@@ -38,6 +38,8 @@ def train(config: DictConfig) -> None:
         config.dataset.train_dataset,
         batch_size=config.dataset.train_batch_size // dist.get_world_size(),
     )
+    # Go to sleep for a bit after making a train dataloader
+    time.sleep(10)
 
     # Composer can take dataloaders, dataspecs, evaluators, or list of evaluators
     eval_set: Optional[Union[DataSpec, List[Evaluator]]] = None
@@ -53,13 +55,16 @@ def train(config: DictConfig) -> None:
             )
             evaluator = hydra.utils.instantiate(eval_conf.evaluator, dataloader=eval_dataloader)
             evaluators.append(evaluator)
-
+            # Go to sleep for a bit after making an evaluator
+            time.sleep(10)
+            
         eval_set = evaluators
 
     else:
         eval_set = hydra.utils.instantiate(config.dataset.eval_dataset,
                                            batch_size=config.dataset.eval_batch_size // dist.get_world_size())
-
+        # Go to sleep for a bit after making an evaluator
+        time.sleep(10)
     # Build list of loggers, callbacks, and algorithms to pass to trainer
     logger: List[LoggerDestination] = []
     callbacks: List[Callback] = []
