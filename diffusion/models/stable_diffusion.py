@@ -82,6 +82,7 @@ class StableDiffusion(ComposerModel):
                  text_key: str = 'captions',
                  image_latents_key: str = 'image_latents',
                  text_latents_key: str = 'caption_latents',
+                 parameterization: str = 'discrete',
                  precomputed_latents: bool = False,
                  encode_latents_in_fp16: bool = False,
                  fsdp: bool = False):
@@ -97,6 +98,9 @@ class StableDiffusion(ComposerModel):
         self.image_key = image_key
         self.image_latents_key = image_latents_key
         self.precomputed_latents = precomputed_latents
+        self.parameterization = parameterization.lower()
+        if self.parameterization not in ['discrete', 'continuous']:
+            raise ValueError(f'parameterization must be one of discrete or continuous. Got {parameterization}')
 
         # setup metrics
         if train_metrics is None:
@@ -176,17 +180,32 @@ class StableDiffusion(ComposerModel):
             latents *= 0.18215
 
         # Sample the diffusion timesteps
-        timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
-        # Add noise to the inputs (forward diffusion)
-        noise = torch.randn_like(latents)
-        noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+        if self.parameterization == 'discrete':
+            timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
+            # Add noise to the inputs (forward diffusion)
+            noise = torch.randn_like(latents)
+            noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+        elif self.parameterization == 'continuous':
+            timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device) * len(self.noise_scheduler)
+            # Add noise to the inputs (forward diffusion)
+            noise = torch.randn_like(latents)
+            phi = timesteps / len(self.noise_scheduler)
+            phi = phi.view(len(phi), *(1,) * (len(latents.shape) - 1))
+            noised_latents = torch.cos(phi) * latents + torch.sin(phi) * noise
+        else:
+            raise ValueError(f'parameterization must be one of discrete or continuous. Got {self.parameterization}')
+
         # Generate the targets
-        if self.prediction_type == 'epsilon':
+        if self.prediction_type == 'epsilon' and self.parameterization == 'discrete':
             targets = noise
-        elif self.prediction_type == 'sample':
+        elif self.prediction_type == 'sample' and self.parameterization == 'discrete':
             targets = latents
-        elif self.prediction_type == 'v_prediction':
-            targets = self.noise_scheduler.get_velocity(latents, noise, timesteps)
+        elif self.prediction_type == 'v_prediction' or self.parameterization == 'continuous':
+            if self.parameterization == 'discrete':
+                targets = self.noise_scheduler.get_velocity(latents, noise, timesteps)
+            elif self.parameterization == 'continuous':
+                # Continuous parameterization is always going to use v, and v is computed outside the scheduler
+                targets = torch.cos(phi) * noise - torch.sin(phi) * latents
         else:
             raise ValueError(
                 f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
@@ -367,7 +386,15 @@ class StableDiffusion(ComposerModel):
         latents = latents * self.inference_scheduler.init_noise_sigma
 
         # backward diffusion process
-        for t in tqdm(self.inference_scheduler.timesteps, disable=not progress_bar):
+        if self.parameterization == 'discrete':
+            timesteps = self.inference_scheduler.timesteps
+        elif self.parameterization == 'continuous':
+            tmax = self.inference_scheduler.config.num_train_timesteps
+            timesteps = torch.linspace(tmax, 0, steps=num_inference_steps, device=device)
+            # Trim off the last step, since we don't integrate past t=0
+            timesteps = timesteps[:-1]
+            dt = 1 / timesteps.shape[0]
+        for t in tqdm(timesteps, disable=not progress_bar):
             if do_classifier_free_guidance:
                 latent_model_input = torch.cat([latents] * 2)
             else:
@@ -383,7 +410,12 @@ class StableDiffusion(ComposerModel):
                 pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            latents = self.inference_scheduler.step(pred, t, latents, generator=rng_generator).prev_sample
+            if self.parameterization == 'discrete':
+                latents = latents = self.inference_scheduler.step(pred, t, latents, generator=rng_generator).prev_sample
+            elif self.parameterization == 'continuous':
+                latents = latents - dt * pred
+            else:
+                raise ValueError(f'parameterization must be one of discrete or continuous. Got {self.parameterization}')
 
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
