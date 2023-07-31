@@ -27,7 +27,7 @@ def train(config: DictConfig) -> None:
     """
     reproducibility.seed_all(config['seed'])
 
-    device = dist.get_device()
+    device = dist.get_device('gpu')
     dist.initialize_dist(device, 300)
 
     model: ComposerModel = hydra.utils.instantiate(config.model)
