@@ -13,7 +13,7 @@ from composer.algorithms.low_precision_groupnorm import apply_low_precision_grou
 from composer.algorithms.low_precision_layernorm import apply_low_precision_layernorm
 from composer.core import Precision
 from composer.loggers import LoggerDestination
-from composer.utils import dist, reproducibility
+from composer.utils import dist, reproducibility, get_device
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -26,6 +26,9 @@ def train(config: DictConfig) -> None:
         Optional[float]: Metric score for hyperparameter optimization
     """
     reproducibility.seed_all(config['seed'])
+
+    device = dist.get_device()
+    dist.initialize_dist(device, 300)
 
     model: ComposerModel = hydra.utils.instantiate(config.model)
 
@@ -57,6 +60,7 @@ def train(config: DictConfig) -> None:
         eval_set = evaluators
 
     else:
+        dist.barrier()
         eval_set = hydra.utils.instantiate(config.dataset.eval_dataset,
                                            batch_size=config.dataset.eval_batch_size // dist.get_world_size())
 
@@ -109,6 +113,7 @@ def train(config: DictConfig) -> None:
 
     scheduler = hydra.utils.instantiate(config.scheduler)
 
+    dist.barrier()
     trainer: Trainer = hydra.utils.instantiate(
         config.trainer,
         train_dataloader=train_dataloader,
