@@ -99,8 +99,8 @@ class StableDiffusion(ComposerModel):
         self.image_latents_key = image_latents_key
         self.precomputed_latents = precomputed_latents
         self.parameterization = parameterization.lower()
-        if self.parameterization not in ['discrete', 'continuous']:
-            raise ValueError(f'parameterization must be one of discrete or continuous. Got {parameterization}')
+        if self.parameterization not in ['discrete', 'continuous', 'alpha']:
+            raise ValueError(f'parameterization must be one of discrete, continuous, or alpha. Got {parameterization}')
 
         # setup metrics
         if train_metrics is None:
@@ -185,6 +185,17 @@ class StableDiffusion(ComposerModel):
         targets = torch.cos(phi) * noise - torch.sin(phi) * latents
         return noised_latents, targets, timesteps
 
+    def _get_alpha_inputs_and_targets(self, latents):
+        timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device)
+        # Add noise to the inputs (forward diffusion)
+        noise = torch.randn_like(latents)
+        alpha = timesteps.view(len(timesteps), *(1,) * (len(latents.shape) - 1))
+        noised_latents = (1 - alpha) * latents + alpha * noise
+        # Generate the targets
+        # alpha parameterization is always going to use v, and v is computed outside the scheduler
+        targets = noise - latents
+        return noised_latents, targets, timesteps
+
     def forward(self, batch):
         latents, conditioning = None, None
         # Use latents if specified and available. When specified, they might not exist during eval
@@ -212,8 +223,10 @@ class StableDiffusion(ComposerModel):
             noised_latents, targets, timesteps = self._get_discrete_inputs_and_targets(latents)
         elif self.parameterization == 'continuous':
             noised_latents, targets, timesteps = self._get_continuous_inputs_and_targets(latents)
+        elif self.parameterization == 'alpha':
+            noised_latents, targets, timesteps = self._get_alpha_inputs_and_targets(latents)
         else:
-            raise ValueError(f'parameterization must be one of discrete or continuous. Got {self.parameterization}')
+            raise ValueError(f'parameterization must be one of discrete, continuous, or alpha. Got {self.parameterization}')
         # Forward through the model
         return self.unet(noised_latents, timesteps, conditioning)['sample'], targets, timesteps
 
@@ -393,7 +406,7 @@ class StableDiffusion(ComposerModel):
         # backward diffusion process
         if self.parameterization == 'discrete':
             timesteps = self.inference_scheduler.timesteps
-        elif self.parameterization == 'continuous':
+        elif self.parameterization in ['continuous', 'alpha']:
             tmax = self.inference_scheduler.config.num_train_timesteps
             timesteps = torch.linspace(tmax, 0, steps=num_inference_steps, device=device)
             # Trim off the last step, since we don't integrate past t=0
@@ -417,7 +430,7 @@ class StableDiffusion(ComposerModel):
             # compute the previous noisy sample x_t -> x_t-1
             if self.parameterization == 'discrete':
                 latents = latents = self.inference_scheduler.step(pred, t, latents, generator=rng_generator).prev_sample
-            elif self.parameterization == 'continuous':
+            elif self.parameterization in ['continuous', 'alpha']:
                 latents = latents - dt * pred
             else:
                 raise ValueError(f'parameterization must be one of discrete or continuous. Got {self.parameterization}')
