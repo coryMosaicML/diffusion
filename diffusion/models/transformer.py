@@ -563,6 +563,8 @@ class ComposerLatentDiffusionTransformer(ComposerModel):
                  loss_bins: Optional[List] = None,
                  image_key: str = 'image',
                  text_key: str = 'captions',
+                 use_image_latents: bool = False,
+                 use_caption_latents: bool = False,
                  fsdp: bool = True):
         super().__init__()
         self.model = model
@@ -617,6 +619,8 @@ class ComposerLatentDiffusionTransformer(ComposerModel):
         self.tokenizer = tokenizer
         self.inference_scheduler = inference_noise_scheduler
         self.text_key = text_key
+        self.use_image_latents = use_image_latents
+        self.use_caption_latents = use_caption_latents
         # freeze encoders during diffusion training
         self.image_encoder.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
@@ -629,18 +633,21 @@ class ComposerLatentDiffusionTransformer(ComposerModel):
             self.text_encoder._fsdp_wrap = False
             self.model._fsdp_wrap = True
 
-    def forward(self, batch):
+    def forward(self, batch, mode='train'):
         inputs, conditioning = batch[self.image_key], batch[self.text_key]
         if 'mask' in batch:
             attention_mask = batch['mask'].bool()
         else:
             attention_mask = None
-        conditioning = conditioning.view(-1, conditioning.shape[-1])
         with torch.cuda.amp.autocast(enabled=False):
-            conditioning = self.text_encoder(conditioning)[0]
-            # Encode the images
-            inputs = self.image_encoder.encode(inputs.half())['latent_dist'].sample().data
-        inputs *= 0.18215 # Magic scaling number
+            if mode =='eval' or not self.use_caption_latents:
+                # Encode the captions
+                conditioning = conditioning.view(-1, conditioning.shape[-1])
+                conditioning = self.text_encoder(conditioning)[0]
+            if mode =='eval' or not self.use_image_latents:
+                # Encode the images
+                inputs = self.image_encoder.encode(inputs.half())['latent_dist'].sample().data
+                inputs *= 0.18215 # Magic scaling number
         # Sample the diffusion timesteps
         timesteps = torch.randint(0, len(self.noise_scheduler), (inputs.shape[0],), device=inputs.device)
         # Add noise to the inputs (forward diffusion)
@@ -669,7 +676,7 @@ class ComposerLatentDiffusionTransformer(ComposerModel):
         if outputs is not None:
             return outputs
         # Get unet outputs
-        model_out, targets, timesteps = self.forward(batch)
+        model_out, targets, timesteps = self.forward(batch, mode='eval')
         # Sample images from the prompts in the batch
         prompts = batch[self.text_key]
         height, width = batch[self.image_key].shape[-2], batch[self.image_key].shape[-1]

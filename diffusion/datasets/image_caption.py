@@ -4,6 +4,7 @@
 """Streaming Image-Caption dataset."""
 
 import random
+import numpy as np
 from io import BytesIO
 from typing import Callable, Dict, List, Optional, Sequence, Union
 
@@ -50,7 +51,12 @@ class StreamingImageCaptionDataset(StreamingDataset):
         transform: Optional[Callable] = None,
         image_size: Optional[int] = None,
         image_key: str = 'image',
+        image_latent_key: str = 'image_latent',
+        latent_size: int = 64,
+        use_image_latents: bool = False,
         caption_key: str = 'caption',
+        caption_latent_key: str = 'caption_latent',
+        use_caption_latents: bool = False,
         **streaming_kwargs,
     ) -> None:
 
@@ -70,33 +76,52 @@ class StreamingImageCaptionDataset(StreamingDataset):
         self.caption_selection = caption_selection
         self.image_size = image_size
         self.image_key = image_key
+        self.image_latent_key = image_latent_key
+        self.use_image_latents = use_image_latents
+        self.latent_size = latent_size
         self.caption_key = caption_key
+        self.caption_latent_key = caption_latent_key
+        self.use_caption_latents = use_caption_latents
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)
 
         # Image
-        img = sample[self.image_key]
-        if not isinstance(img, Image.Image):
-            img = Image.open(BytesIO(sample[self.image_key]))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        if self.transform is not None:
-            img = self.transform(img)
+        if self.use_image_latents:
+            img = sample[self.image_latent_key]
+            img = np.frombuffer(img, dtype=np.float16).copy()
+            img = torch.from_numpy(img).reshape(4, self.latent_size, self.latent_size)
+        else:
+            img = sample[self.image_key]
+            if not isinstance(img, Image.Image):
+                img = Image.open(BytesIO(sample[self.image_key]))
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            if self.transform is not None:
+                img = self.transform(img)
 
         # Caption
-        if torch.rand(1) < self.caption_drop_prob:
-            caption = ''
+        if self.use_caption_latents:
+            captions = sample[self.caption_latent_key]
+            captions = np.frombuffer(captions, dtype=np.float16).copy()
+            captions = torch.from_numpy(captions).reshape(77, 1024)
+            mask = torch.ones(captions.shape[0])
+            # Drop the caption via masking the latents
+            if torch.rand(1) < self.caption_drop_prob:
+                mask *=0 
         else:
-            caption = sample[self.caption_key]
-            if isinstance(caption, List) and self.caption_selection == 'first':
-                caption = caption[0]
-            if isinstance(caption, List) and self.caption_selection == 'random':
-                caption = random.sample(caption, k=1)[0]
-
-        tokenized = self.tokenizer(caption, padding='max_length', truncation=True, return_tensors='pt', return_special_tokens_mask=True)
-        mask = tokenized['attention_mask'][0] & ~tokenized['special_tokens_mask'][0]
-        return {'image': img, 'captions': tokenized['input_ids'][0], 'mask': mask}
+            if torch.rand(1) < self.caption_drop_prob:
+                caption = ''
+            else:
+                caption = sample[self.caption_key]
+                if isinstance(caption, List) and self.caption_selection == 'first':
+                    caption = caption[0]
+                if isinstance(caption, List) and self.caption_selection == 'random':
+                    caption = random.sample(caption, k=1)[0]
+            tokenized = self.tokenizer(caption, padding='max_length', truncation=True, return_tensors='pt', return_special_tokens_mask=True)
+            mask = tokenized['attention_mask'][0] & ~tokenized['special_tokens_mask'][0]
+            captions = tokenized['input_ids'][0]
+        return {'image': img, 'captions': captions, 'mask': mask}
 
 
 def build_streaming_image_caption_dataloader(
@@ -109,7 +134,12 @@ def build_streaming_image_caption_dataloader(
     caption_selection: str = 'first',
     transform: Optional[List[Callable]] = None,
     image_key: str = 'image',
+    image_latent_key: str = 'image_latent',
+    latent_size: int = 64,
+    use_image_latents: bool = False,
     caption_key: str = 'caption',
+    caption_latent_key: str = 'caption_latent',
+    use_caption_latents: bool = False,
     streaming_kwargs: Optional[Dict] = None,
     dataloader_kwargs: Optional[Dict] = None,
 ):
@@ -171,7 +201,12 @@ def build_streaming_image_caption_dataloader(
         transform=transform,
         image_size=resize_size,
         image_key=image_key,
+        image_latent_key=image_latent_key,
+        latent_size=latent_size,
+        use_image_latents=use_image_latents,
         caption_key=caption_key,
+        caption_latent_key=caption_latent_key,
+        use_caption_latents=use_caption_latents,
         batch_size=batch_size,
         **streaming_kwargs,
     )

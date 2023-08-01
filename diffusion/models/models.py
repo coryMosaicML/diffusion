@@ -395,6 +395,8 @@ def latent_diffusion_transformer(
     val_seed: int = 1138,
     loss_bins: Optional[List] = None,
     fsdp: bool = True,
+    use_image_latents: bool = False,
+    use_caption_latents: bool = False,
 ):
     if train_metrics is None:
         train_metrics = [MeanSquaredError()]
@@ -447,6 +449,8 @@ def latent_diffusion_transformer(
                                          loss_bins=loss_bins,
                                          image_key='image',
                                          text_key='captions',
+                                         use_image_latents=use_image_latents,
+                                         use_caption_latents=use_caption_latents,
                                          fsdp=fsdp)
 
     if torch.cuda.is_available():
