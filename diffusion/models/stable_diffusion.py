@@ -177,7 +177,7 @@ class StableDiffusion(ComposerModel):
         timesteps = len(self.noise_scheduler) * torch.rand(latents.shape[0], device=latents.device)
         # Add noise to the inputs (forward diffusion)
         noise = torch.randn_like(latents)
-        phi = timesteps / len(self.noise_scheduler)
+        phi = ( timesteps / len(self.noise_scheduler) ) * torch.pi/2
         phi = phi.view(len(phi), *(1,) * (len(latents.shape) - 1))
         noised_latents = torch.cos(phi) * latents + torch.sin(phi) * noise
         # Generate the targets
@@ -409,10 +409,12 @@ class StableDiffusion(ComposerModel):
             timesteps = self.inference_scheduler.timesteps
         elif self.parameterization in ['continuous', 'alpha']:
             tmax = self.inference_scheduler.config.num_train_timesteps
-            timesteps = torch.linspace(tmax, 0, steps=num_inference_steps, device=device)
+            timesteps = torch.linspace(tmax, 0, steps=num_inference_steps + 1, device=device)
             # Trim off the last step, since we don't integrate past t=0
             timesteps = timesteps[:-1]
             dt = 1 / timesteps.shape[0]
+            if self.parameterization == 'continuous':
+                dt = torch.pi / 2 * dt
         for t in tqdm(timesteps, disable=not progress_bar):
             if do_classifier_free_guidance:
                 latent_model_input = torch.cat([latents] * 2)
