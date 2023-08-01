@@ -190,6 +190,7 @@ class StableDiffusion(ComposerModel):
         # Add noise to the inputs (forward diffusion)
         noise = torch.randn_like(latents)
         alpha = timesteps.view(len(timesteps), *(1,) * (len(latents.shape) - 1))
+        alpha = alpha / len(self.noise_scheduler)
         noised_latents = (1 - alpha) * latents + alpha * noise
         # Generate the targets
         # alpha parameterization is always going to use v, and v is computed outside the scheduler
