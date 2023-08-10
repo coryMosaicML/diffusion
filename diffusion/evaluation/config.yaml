@@ -1,0 +1,19 @@
+reference_model: # This is the models that all other models will be measured against
+  name: 1p13b-laion # Name of the model
+  path: images/1p13b-laion # Path to the dir containing the metadata of generated images
+models: # These are the models that will be compared against the reference model
+  - name: 10m-laion
+    path: images/10m-laion
+  - name: 90m-laion
+    path: images/90m-laion
+  - name: 90m-blip2
+    path: images/90m-blip2
+  - name: 90m-continuous-alpha
+    path: images/continuous-alpha
+  - name: yfcc-blip2-256
+    path: images/yfcc-blip2-256
+image_size: 256 # The size of the images
+question: Which image do you prefer? # The question that will be asked to the user
+display_prompt: true # Whether to display the image prompts to the user
+share: true # Whether to use a sharable interface
+output_file: output_team_eval.csv # The file to write the results to
