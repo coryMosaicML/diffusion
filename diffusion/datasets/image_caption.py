@@ -101,7 +101,7 @@ class StreamingImageCaptionDataset(StreamingDataset):
             crop_w = 0
         # Make the crop string by rounding to 2 decimal places
         crop_str = ' CROP_H_{:.2f}_W_{:.2f}'.format(crop_h, crop_w)
-        print(crop_str)
+
         # Caption
         if torch.rand(1) < self.caption_drop_prob:
             caption = '' + crop_str
