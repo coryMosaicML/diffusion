@@ -82,24 +82,43 @@ class StreamingImageCaptionDataset(StreamingDataset):
         if img.mode != 'RGB':
             img = img.convert('RGB')
         if self.transform is not None:
-            img = self.transform(img)
+            transformed_img = self.transform(img)
 
+        # Compute the fraction of the image that has been cropped
+        H, W = img.size
+        if isinstance(transformed_img, torch.Tensor):
+            H_new, W_new = transformed_img.shape[-2:]
+        elif isinstance(transformed_img, Image.Image):
+            W_new, H_new = transformed_img.size
+        if H > W:
+            crop_h = (H - W)/W
+            crop_w = 0
+        elif W > H:
+            crop_w = (W - H)/H
+            crop_h = 0
+        elif W == H:
+            crop_h = 0
+            crop_w = 0
+        # Make the crop string by rounding to 2 decimal places
+        crop_str = ' CROP_H_{:.2f}_W_{:.2f}'.format(crop_h, crop_w)
+        print(crop_str)
         # Caption
         if torch.rand(1) < self.caption_drop_prob:
-            caption = ''
+            caption = '' + crop_str
         else:
             caption = sample[self.caption_key]
             if isinstance(caption, List) and self.caption_selection == 'first':
                 caption = caption[0]
             if isinstance(caption, List) and self.caption_selection == 'random':
                 caption = random.sample(caption, k=1)[0]
+            caption = caption + crop_str
         tokenized_caption = self.tokenizer(caption,
                                            padding='max_length',
                                            max_length=self.tokenizer.model_max_length,
                                            truncation=True,
                                            return_tensors='pt')['input_ids'][0]
 
-        return {'image': img, 'captions': tokenized_caption}
+        return {'image': transformed_img, 'captions': tokenized_caption}
 
 
 def build_streaming_image_caption_dataloader(
