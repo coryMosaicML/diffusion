@@ -3,7 +3,7 @@
 
 """Constructors for diffusion models."""
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from composer.devices import DeviceGPU
@@ -13,6 +13,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.multimodal.clip_score import CLIPScore
 from transformers import CLIPTextModel, CLIPTokenizer, PretrainedConfig
 
+from diffusion.models.autoencoder import ComposerAutoEncoder
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
@@ -237,6 +238,42 @@ def stable_diffusion_xl(
         if is_xformers_installed:
             model.unet.enable_xformers_memory_efficient_attention()
             model.vae.enable_xformers_memory_efficient_attention()
+    return model
+
+
+def autoencoder(input_channels: int = 3,
+                output_channels: int = 3,
+                hidden_channels: int = 128,
+                latent_channels: int = 4,
+                double_latent_channels: bool = True,
+                channel_multipliers: Tuple[int, ...] = (1, 2, 4, 4),
+                num_residual_blocks: int = 2,
+                use_conv_shortcut=False,
+                dropout_probability: float = 0.0,
+                resample_with_conv: bool = True,
+                input_key: str = 'image',
+                kl_divergence_weight: float = 1.0,
+                lpips_weight: float = 0.25,
+                discriminator_weight: float = 0.5,
+                discriminator_num_filters: int = 64,
+                discriminator_num_layers: int = 3):
+    """Autoencoder training setup."""
+    model = ComposerAutoEncoder(input_channels=input_channels,
+                                output_channels=output_channels,
+                                hidden_channels=hidden_channels,
+                                latent_channels=latent_channels,
+                                double_latent_channels=double_latent_channels,
+                                channel_multipliers=channel_multipliers,
+                                num_residual_blocks=num_residual_blocks,
+                                use_conv_shortcut=use_conv_shortcut,
+                                dropout_probability=dropout_probability,
+                                resample_with_conv=resample_with_conv,
+                                input_key=input_key,
+                                kl_divergence_weight=kl_divergence_weight,
+                                lpips_weight=lpips_weight,
+                                discriminator_weight=discriminator_weight,
+                                discriminator_num_filters=discriminator_num_filters,
+                                discriminator_num_layers=discriminator_num_layers)
     return model
 
 
