@@ -11,7 +11,7 @@ import torch
 from composer.utils.file_helpers import get_file
 from PIL import Image
 
-from diffusion.models import stable_diffusion_xl
+from diffusion.models.models import stable_diffusion_xl
 
 # Local checkpoint params
 LOCAL_CHECKPOINT_PATH = '/tmp/model.pt'
