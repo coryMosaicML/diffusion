@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.multimodal import CLIPScore
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
-from transformers import PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase, CLIPTokenizer
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -85,6 +85,7 @@ class CleanFIDEvaluator:
         self.precision = precision
         self.prompts = prompts if prompts is not None else ['A shiba inu wearing a blue sweater']
 
+        self.clipscore_tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch16', subfolder='tokenizer')
         # Init loggers
         if self.loggers and dist.get_local_rank() == 0:
             for logger in self.loggers:
@@ -146,7 +147,14 @@ class CleanFIDEvaluator:
             # Get the prompts from the tokens
             text_captions = self.tokenizer.batch_decode(captions, skip_special_tokens=True)
             # Ensure that the text captions are shorter than the clip model's max length
-            text_captions = [caption[:77] for caption in text_captions]
+            # Tokenize the text captions
+            tokenized_captions = self.clipscore_tokenizer(text_captions,
+                                                padding='max_length',
+                                                max_length=self.clipscore_tokenizer.model_max_length,
+                                                truncation=True,
+                                                return_tensors='pt')['input_ids']
+            # Untokenize the captions back to text
+            text_captions = self.clipscore_tokenizer.batch_decode(tokenized_captions, skip_special_tokens=True)
             self.clip_metric.update((generated_images * 255).to(torch.uint8), text_captions)
             # Save the real images
             # Verify that the real images are in the proper range
