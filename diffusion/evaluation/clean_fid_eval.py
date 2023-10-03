@@ -101,7 +101,6 @@ class CleanFIDEvaluator:
         # Move CLIP metric to device
         self.device = dist.get_local_rank()
         self.clip_metric = self.clip_metric.to(self.device)
-
         # Predownload the CLIP model for computing clip-fid
         _, _ = clip.load('ViT-B/32', device=self.device)
 
@@ -146,6 +145,8 @@ class CleanFIDEvaluator:
                                                        progress_bar=False)  # type: ignore
             # Get the prompts from the tokens
             text_captions = self.tokenizer.batch_decode(captions, skip_special_tokens=True)
+            # Ensure that the text captions are shorter than the clip model's max length
+            text_captions = [caption[:77] for caption in text_captions]
             self.clip_metric.update((generated_images * 255).to(torch.uint8), text_captions)
             # Save the real images
             # Verify that the real images are in the proper range
