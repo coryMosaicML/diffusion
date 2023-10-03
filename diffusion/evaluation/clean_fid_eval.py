@@ -85,7 +85,7 @@ class CleanFIDEvaluator:
         self.precision = precision
         self.prompts = prompts if prompts is not None else ['A shiba inu wearing a blue sweater']
 
-        self.clipscore_tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch16', subfolder='tokenizer')
+        self.clipscore_tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch16')
         # Init loggers
         if self.loggers and dist.get_local_rank() == 0:
             for logger in self.loggers:
