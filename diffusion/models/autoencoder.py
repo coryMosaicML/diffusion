@@ -3,7 +3,7 @@
 
 """Autoencoder parts for training latent diffusion models."""
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import lpips
 import torch
@@ -31,6 +31,7 @@ class Encoder(nn.Module):
         use_conv_shortcut (bool): Whether to use a conv for the shortcut. Default: `False`.
         dropout (float): Dropout probability. Default: `0.0`.
         resample_with_conv (bool): Whether to use a conv for downsampling. Default: `True`.
+        use_attention (bool): Whether to use an attention layer before/after the autoencoder bottleneck. Default `True`.
         zero_init_last (bool): Whether to initialize the last conv layer to zero. Default: `False`.
     """
 
@@ -44,6 +45,7 @@ class Encoder(nn.Module):
                  use_conv_shortcut=False,
                  dropout_probability: float = 0.0,
                  resample_with_conv: bool = True,
+                 use_attention: bool = True,
                  zero_init_last: bool = False):
         super().__init__()
         self.input_channels = input_channels
@@ -56,6 +58,7 @@ class Encoder(nn.Module):
         self.use_conv_shortcut = use_conv_shortcut
         self.dropout_probability = dropout_probability
         self.resample_with_conv = resample_with_conv
+        self.use_attention = use_attention
         self.zero_init_last = zero_init_last
 
         # Inital conv layer to get to the hidden dimensionality
@@ -90,8 +93,9 @@ class Encoder(nn.Module):
                                      zero_init_last=zero_init_last)
         self.blocks.append(middle_block_1)
 
-        attention = AttentionLayer(input_channels=block_output_channels)
-        self.blocks.append(attention)
+        if self.use_attention:
+            attention = AttentionLayer(input_channels=block_output_channels)
+            self.blocks.append(attention)
 
         middle_block_2 = ResNetBlock(input_channels=block_output_channels,
                                      output_channels=block_output_channels,
@@ -131,6 +135,7 @@ class Decoder(nn.Module):
         use_conv_shortcut (bool): Whether to use a conv for the shortcut. Default: `False`.
         dropout (float): Dropout probability. Default: `0.0`.
         resample_with_conv (bool): Whether to use a conv for upsampling. Default: `True`.
+        use_attention (bool): Whether to use an attention layer before/after the autoencoder bottleneck. Default `True`.
         zero_init_last (bool): Whether to initialize the last conv layer to zero. Default: `False`.
     """
 
@@ -143,6 +148,7 @@ class Decoder(nn.Module):
                  use_conv_shortcut=False,
                  dropout_probability: float = 0.0,
                  resample_with_conv: bool = True,
+                 use_attention: bool = True,
                  zero_init_last: bool = False):
         super().__init__()
         self.latent_channels = latent_channels
@@ -153,6 +159,7 @@ class Decoder(nn.Module):
         self.use_conv_shortcut = use_conv_shortcut
         self.dropout_probability = dropout_probability
         self.resample_with_conv = resample_with_conv
+        self.use_attention = use_attention
         self.zero_init_last = zero_init_last
 
         # Input conv layer to get to the hidden dimensionality
@@ -169,8 +176,9 @@ class Decoder(nn.Module):
                                      zero_init_last=zero_init_last)
         self.blocks.append(middle_block_1)
 
-        attention = AttentionLayer(input_channels=channels)
-        self.blocks.append(attention)
+        if self.use_attention:
+            attention = AttentionLayer(input_channels=channels)
+            self.blocks.append(attention)
 
         middle_block_2 = ResNetBlock(input_channels=channels,
                                      output_channels=channels,
@@ -214,6 +222,23 @@ class Decoder(nn.Module):
         return h
 
 
+class GaussianDistribution:
+    """Wrapper class for a gaussian distribution for consistency with huggingface diffusers.
+
+    Args:
+        mean (torch.Tensor): Mean of the distribution.
+        logvar (torch.Tensor): Log variance of the distribution.
+    """
+
+    def __init__(self, mean: torch.Tensor, logvar: torch.Tensor):
+        self.mean = mean
+        self.logvar = logvar
+        self.std = torch.exp(0.5 * logvar)
+
+    def sample(self) -> torch.Tensor:
+        return self.mean + self.std * torch.randn_like(self.mean)
+
+
 class AutoEncoder(nn.Module):
     """Autoencoder module for training a latent diffusion model.
 
@@ -223,11 +248,12 @@ class AutoEncoder(nn.Module):
         hidden_channels (int): Number of hidden channels. Default: `128`.
         latent_channels (int): Number of latent channels. Default: `4`.
         double_latent_channels (bool): Whether to double the latent channels. Default: `True`.
-        channel_multipliers (Tuple[int, ...]): Multipliers for the number of channels in each block. Default: `(1, 2, 4, 8)`.
-        num_residual_blocks (int): Number of residual blocks in each block. Default: `4`.
+        channel_multipliers (Tuple[int, ...]): Multipliers for the number of channels in each block. Default: `(1, 2, 4, 4)`.
+        num_residual_blocks (int): Number of residual blocks in each block. Default: `2`.
         use_conv_shortcut (bool): Whether to use a conv for the shortcut. Default: `False`.
         dropout (float): Dropout probability. Default: `0.0`.
         resample_with_conv (bool): Whether to use a conv for down/up sampling. Default: `True`.
+        use_attention (bool): Whether to use an attention layer before/after the autoencoder bottleneck. Default `True`.
         zero_init_last (bool): Whether to initialize the last conv layer to zero. Default: `False`.
     """
 
@@ -237,11 +263,12 @@ class AutoEncoder(nn.Module):
                  hidden_channels: int = 128,
                  latent_channels: int = 4,
                  double_latent_channels: bool = True,
-                 channel_multipliers: Tuple[int, ...] = (1, 2, 4, 8),
-                 num_residual_blocks: int = 4,
+                 channel_multipliers: Tuple[int, ...] = (1, 2, 4, 4),
+                 num_residual_blocks: int = 2,
                  use_conv_shortcut=False,
                  dropout_probability: float = 0.0,
                  resample_with_conv: bool = True,
+                 use_attention: bool = True,
                  zero_init_last: bool = False):
         super().__init__()
         self.input_channels = input_channels
@@ -254,6 +281,7 @@ class AutoEncoder(nn.Module):
         self.use_conv_shortcut = use_conv_shortcut
         self.dropout_probability = dropout_probability
         self.resample_with_conv = resample_with_conv
+        self.use_attention = use_attention
         self.zero_init_last = zero_init_last
 
         self.encoder = Encoder(input_channels=self.input_channels,
@@ -265,6 +293,7 @@ class AutoEncoder(nn.Module):
                                use_conv_shortcut=self.use_conv_shortcut,
                                dropout_probability=self.dropout_probability,
                                resample_with_conv=self.resample_with_conv,
+                               use_attention=self.use_attention,
                                zero_init_last=self.zero_init_last)
 
         channels = 2 * self.latent_channels if self.double_latent_channels else self.latent_channels
@@ -286,22 +315,41 @@ class AutoEncoder(nn.Module):
                                use_conv_shortcut=self.use_conv_shortcut,
                                dropout_probability=self.dropout_probability,
                                resample_with_conv=self.resample_with_conv,
+                               use_attention=self.use_attention,
                                zero_init_last=self.zero_init_last)
 
         self.post_quant_conv = nn.Conv2d(self.latent_channels, self.latent_channels, kernel_size=1, stride=1, padding=0)
         nn.init.kaiming_normal_(self.post_quant_conv.weight, nonlinearity='linear')
 
+    def state_dict(self) -> Dict[str, Any]:
+        state = super(AutoEncoder, self).state_dict()
+        # Save the autoencoder config
+        state['config'] = {}
+        state['config']['input_channels'] = self.input_channels
+        state['config']['output_channels'] = self.output_channels
+        state['config']['hidden_channels'] = self.hidden_channels
+        state['config']['latent_channels'] = self.latent_channels
+        state['config']['double_latent_channels'] = self.double_latent_channels
+        state['config']['channel_multipliers'] = self.channel_multipliers
+        state['config']['num_residual_blocks'] = self.num_residual_blocks
+        state['config']['use_conv_shortcut'] = self.use_conv_shortcut
+        state['config']['dropout_probability'] = self.dropout_probability
+        state['config']['resample_with_conv'] = self.resample_with_conv
+        state['config']['use_attention'] = self.use_attention
+        state['config']['zero_init_last'] = self.zero_init_last
+        return state
+
     def get_last_layer_weight(self) -> torch.Tensor:
         """Get the weight of the last layer of the decoder."""
         return self.decoder.conv_out.weight
 
-    def encode(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def encode(self, x: torch.Tensor) -> Dict:
         """Encode an input tensor into a latent tensor."""
         h = self.encoder(x)
         moments = self.quant_conv(h)
         # Split the moments into mean and log variance
         mean, log_var = moments[:, :self.latent_channels], moments[:, self.latent_channels:]
-        return {'mean': mean, 'log_var': log_var}
+        return {'mean': mean, 'log_var': log_var, 'latent_dist': GaussianDistribution(mean, log_var)}
 
     def decode(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Decode a latent tensor into an output tensor."""
@@ -502,6 +550,10 @@ class AutoEncoderLoss(nn.Module):
         # Count the number of latent elements to normalize the loss
         num_latent_elements = mean.numel() // kl_div_loss.shape[0]
         losses['kl_div_loss'] = kl_div_loss.mean()
+
+        # Record the latent scales
+        losses['latent_mean'] = outputs['latents'].mean()
+        losses['latent_std'] = outputs['latents'].std()
 
         # Combine the losses. Downweight the kl_div_loss to account for differing dimensionalities.
         dimensionality_weight = num_latent_elements / num_output_elements

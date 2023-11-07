@@ -4,10 +4,12 @@
 """Constructors for diffusion models."""
 
 import logging
+import os
 from typing import List, Optional, Tuple
 
 import torch
 from composer.devices import DeviceGPU
+from composer.utils.file_helpers import get_file
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
 from torchmetrics import MeanSquaredError
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -43,6 +45,7 @@ def stable_diffusion_2(
     encode_latents_in_fp16: bool = True,
     fsdp: bool = True,
     clip_qkv: Optional[float] = None,
+    autoencoder_weights: Optional[str] = None,
 ):
     """Stable diffusion v2 training setup.
 
@@ -67,6 +70,8 @@ def stable_diffusion_2(
         encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
         fsdp (bool): Whether to use FSDP. Defaults to True.
         clip_qkv (float, optional): If not None, clip the qkv values to this value. Defaults to None.
+        autoencoder_weights (str, optional): Path to autoencoder weights. If used, custom autoencoder weights will be
+            downloaded. Defaults to None.
     """
     if train_metrics is None:
         train_metrics = [MeanSquaredError()]
@@ -87,11 +92,32 @@ def stable_diffusion_2(
         config = PretrainedConfig.get_config_dict(model_name, subfolder='unet')
         unet = UNet2DConditionModel(**config[0])
 
+    if autoencoder_weights is not None:
+        # Download the autoencoder weights
+        # Check if the file exists first, skipping the download for debugging
+        if not os.path.exists('/tmp/autoencoder_weights.pt'):
+            get_file(path=autoencoder_weights, destination='/tmp/autoencoder_weights.pt')
+        # Load the autoencoder weights from the state dict
+        vae = AutoEncoder(zero_init_last=True)
+        state_dict = torch.load('/tmp/autoencoder_weights.pt')
+        # Need to clean up the state dict to remove loss and metrics.
+        cleaned_state_dict = {}
+        for key in list(state_dict['state']['model'].keys()):
+            if key.split('.')[0] == 'model':
+                cleaned_key = '.'.join(key.split('.')[1:])
+                cleaned_state_dict[cleaned_key] = state_dict['state']['model'][key]
+            else:
+                print(f'Skipping key {key}')
+        vae.load_state_dict(cleaned_state_dict, strict=True)
+    else:
+        if encode_latents_in_fp16:
+            vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae', torch_dtype=torch.float16)
+        else:
+            vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae')
+
     if encode_latents_in_fp16:
-        vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae', torch_dtype=torch.float16)
         text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder', torch_dtype=torch.float16)
     else:
-        vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae')
         text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
 
     tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
@@ -126,7 +152,8 @@ def stable_diffusion_2(
         model = DeviceGPU().module_to_device(model)
         if is_xformers_installed:
             model.unet.enable_xformers_memory_efficient_attention()
-            model.vae.enable_xformers_memory_efficient_attention()
+            if autoencoder_weights is None:
+                model.vae.enable_xformers_memory_efficient_attention()
 
     if clip_qkv is not None:
         if is_xformers_installed:
@@ -264,6 +291,30 @@ def stable_diffusion_xl(
     return model
 
 
+def latent_diffusion(autoencoder_path: str, autoencoder_local_path: str = '/tmp/autoencoder_weights.pt'):
+    """Setup for generic latent diffusion model.
+
+    Args:
+        autoencoder_path (str): Path to autoencoder weights.
+        autoencoder_local_path (str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
+    """
+    # Download the autoencoder weights and init them
+    if not os.path.exists(autoencoder_local_path):
+        get_file(path=autoencoder_path, destination=autoencoder_local_path)
+    # Load the autoencoder weights from the state dict
+    vae = AutoEncoder(zero_init_last=True)
+    state_dict = torch.load(autoencoder_local_path)
+    # Need to clean up the state dict to remove loss and metrics.
+    cleaned_state_dict = {}
+    for key in list(state_dict['state']['model'].keys()):
+        if key.split('.')[0] == 'model':
+            cleaned_key = '.'.join(key.split('.')[1:])
+            cleaned_state_dict[cleaned_key] = state_dict['state']['model'][key]
+        else:
+            print(f'Skipping key {key}')
+    vae.load_state_dict(cleaned_state_dict, strict=True)
+
+
 def build_autoencoder(input_channels: int = 3,
                       output_channels: int = 3,
                       hidden_channels: int = 128,
@@ -274,6 +325,7 @@ def build_autoencoder(input_channels: int = 3,
                       use_conv_shortcut=False,
                       dropout_probability: float = 0.0,
                       resample_with_conv: bool = True,
+                      use_attention: bool = True,
                       zero_init_last: bool = False,
                       input_key: str = 'image',
                       learn_log_var: bool = True,
@@ -296,6 +348,7 @@ def build_autoencoder(input_channels: int = 3,
         use_conv_shortcut (bool): Whether to use a convolutional shortcut in the residual blocks. Default: `False`.
         dropout_probability (float): Dropout probability. Default: `0.0`.
         resample_with_conv (bool): Whether to use a convolutional resampling layer. Default: `True`.
+        use_attention (bool): Whether to use attention in the encoder and decoder. Default: `True`.
         zero_init_last (bool): Whether to zero initialize the last layer in resblocks+discriminator. Default: `False`.
         input_key (str): Key to use for the input. Default: `image`.
         learn_log_var (bool): Whether to learn the output log variance in the VAE. Default: `True`.
@@ -318,6 +371,7 @@ def build_autoencoder(input_channels: int = 3,
         use_conv_shortcut=use_conv_shortcut,
         dropout_probability=dropout_probability,
         resample_with_conv=resample_with_conv,
+        use_attention=use_attention,
         zero_init_last=zero_init_last,
     )
 
