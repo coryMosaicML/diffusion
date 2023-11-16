@@ -282,7 +282,17 @@ def stable_diffusion_xl(
     return model
 
 
-def latent_diffusion(autoencoder_path: str, autoencoder_local_path: str = '/tmp/autoencoder_weights.pt', encode_latents_in_fp16=True, prediction_type='epsilon', train_metrics=None, val_metrics=None, val_guidance_scales=None, val_seed=1138, loss_bins=None, fsdp=True, clip_qkv=None):
+def latent_diffusion(autoencoder_path: str,
+                     autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
+                     encode_latents_in_fp16=True,
+                     prediction_type='epsilon',
+                     train_metrics=None,
+                     val_metrics=None,
+                     val_guidance_scales=None,
+                     val_seed=1138,
+                     loss_bins=None,
+                     fsdp=False,
+                     clip_qkv=None):
     """Setup for generic latent diffusion model.
 
     Args:
@@ -325,13 +335,12 @@ def latent_diffusion(autoencoder_path: str, autoencoder_local_path: str = '/tmp/
         if isinstance(metric, CLIPScore):
             metric.requires_grad_(False)
 
-
     config = PretrainedConfig.get_config_dict(model_name, subfolder='unet')
     new_config = config[0]
     new_config['in_channels'] = 32
     new_config['out_channels'] = 32
     unet = UNet2DConditionModel(**new_config)
-        
+
     tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
     noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder='scheduler')
     inference_noise_scheduler = DDIMScheduler(num_train_timesteps=noise_scheduler.config.num_train_timesteps,
@@ -358,15 +367,13 @@ def latent_diffusion(autoencoder_path: str, autoencoder_local_path: str = '/tmp/
         loss_bins=loss_bins,
         precomputed_latents=False,
         encode_latents_in_fp16=encode_latents_in_fp16,
-        fsdp=False,
+        fsdp=fsdp,
         latent_scale=1.0,
     )
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
         if is_xformers_installed:
             model.unet.enable_xformers_memory_efficient_attention()
-            if autoencoder_path is None:
-                model.vae.enable_xformers_memory_efficient_attention()
     return model
 
 
