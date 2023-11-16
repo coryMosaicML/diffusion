@@ -89,7 +89,8 @@ class StableDiffusion(ComposerModel):
                  precomputed_latents: bool = False,
                  encode_latents_in_fp16: bool = False,
                  fsdp: bool = False,
-                 sdxl: bool = False):
+                 sdxl: bool = False,
+                 latent_scale: float = 0.18215):
         super().__init__()
         self.unet = unet
         self.vae = vae
@@ -104,10 +105,9 @@ class StableDiffusion(ComposerModel):
         self.image_latents_key = image_latents_key
         self.precomputed_latents = precomputed_latents
         self.sdxl = sdxl
+        self.latent_scale = latent_scale
         if self.sdxl:
             self.latent_scale = 0.13025
-        else:
-            self.latent_scale = 0.18215
 
         # setup metrics
         if train_metrics is None:
@@ -184,14 +184,22 @@ class StableDiffusion(ComposerModel):
                 with torch.cuda.amp.autocast(enabled=False):
                     # Encode the images to the latent space.
                     # Encode prompt into conditioning vector
-                    latents = self.vae.encode(inputs.half())['latent_dist'].sample().data
+                    encoded = self.vae.encode(inputs.half())
+                    mean, log_var = encoded['mean'], encoded['log_var']
+                    # Reparameteriztion trick
+                    latents = mean + torch.exp(0.5 * log_var) * torch.randn_like(mean)
+                    latents = latents.data
                     if self.sdxl:
                         conditioning, pooled_conditioning = self.text_encoder([conditioning, conditioning_2])
                     else:
                         conditioning = self.text_encoder(conditioning)[0]  # Should be (batch_size, 77, 768)
 
             else:
-                latents = self.vae.encode(inputs)['latent_dist'].sample().data
+                encoded = self.vae.encode(inputs)
+                mean, log_var = encoded['mean'], encoded['log_var']
+                # Reparameteriztion trick
+                latents = mean + torch.exp(0.5 * log_var) * torch.randn_like(mean)
+                latents = latents.data
                 if self.sdxl:
                     conditioning, pooled_conditioning = self.text_encoder([conditioning, conditioning_2])
                 else:
@@ -410,7 +418,7 @@ class StableDiffusion(ComposerModel):
         _check_prompt_lenths(prompt_embeds, negative_prompt_embeds)
 
         # Create rng for the generation
-        device = self.vae.device
+        device = next(self.vae.parameters()).device
         rng_generator = torch.Generator(device=device)
         if seed:
             rng_generator = rng_generator.manual_seed(seed)  # type: ignore
@@ -506,7 +514,7 @@ class StableDiffusion(ComposerModel):
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
         latents = 1 / self.latent_scale * latents
-        image = self.vae.decode(latents).sample
+        image = self.vae.decode(latents)['x_recon']
         image = (image / 2 + 0.5).clamp(0, 1)
         return image.detach()  # (batch*num_images_per_prompt, channel, h, w)
 
