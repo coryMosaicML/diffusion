@@ -163,10 +163,8 @@ class CleanFIDEvaluator:
                 text_captions = self.tokenizer.tokenizer.batch_decode(captions[:, 0, :], skip_special_tokens=True)
             else:
                 text_captions = self.tokenizer.batch_decode(captions, skip_special_tokens=True)
-            # Currently, the CLIPScore metric doesn't truncate long sequences.
+            # Currently, the CLIPScore metric has an issue with long sequences.
             # Workaround: Tokenize with the metric's tokenizer, truncate the token sequence, then decode back to text.
-            for t in text_captions:
-                print(len(t))
             metric_tokenized_text = self.clip_metric.processor.tokenizer(
                 text_captions,
                 return_tensors='pt',
