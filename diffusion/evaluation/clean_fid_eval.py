@@ -165,13 +165,15 @@ class CleanFIDEvaluator:
                 text_captions = self.tokenizer.batch_decode(captions, skip_special_tokens=True)
             # Currently, the CLIPScore metric doesn't truncate long sequences.
             # Workaround: Tokenize with the metric's tokenizer, truncate the token sequence, then decode back to text.
+            for t in text_captions:
+                print(len(t))
             metric_tokenized_text = self.clip_metric.processor.tokenizer(
                 text_captions,
                 return_tensors='pt',
                 padding='max_length',
-                max_length=self.clip_metric.processor.tokenizer.model_max_length,
+                max_length=self.clip_metric.processor.tokenizer.model_max_length - 1,
                 truncation=True)
-            text_captions = self.clip_metric.processor.tokenizer.batch_decode(metric_tokenized_text,
+            text_captions = self.clip_metric.processor.tokenizer.batch_decode(metric_tokenized_text['input_ids'],
                                                                               skip_special_tokens=True)
             # Now update the clip score using the (possibly truncated) captions
             self.clip_metric.update((generated_images * 255).to(torch.uint8), text_captions)
