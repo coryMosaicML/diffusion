@@ -75,8 +75,11 @@ class LLaVAInference():
     def predict(self, model_requests: List[Dict[str, Any]]):
         results = []
         for req in model_requests:
+            if 'input' not in req:
+                raise RuntimeError('"input" must be provided to generate call')
+            inputs = req['input']
             # Make the tokenized input
-            prompt = self._add_image_tokens(req['prompt'])
+            prompt = self._add_image_tokens(inputs['prompt'])
             conv = conv_templates[self.conv_mode].copy()
             conv.append_message(conv.roles[0], prompt)
             conv.append_message(conv.roles[1], None)
@@ -85,7 +88,7 @@ class LLaVAInference():
             # Make the stopping criteria
             stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
             # Get the image from the bytes and prep it for input
-            img_data = base64.b64decode(req['image'])
+            img_data = base64.b64decode(inputs['image'])
             img = Image.open(BytesIO(img_data))
             img = self.to_tensor(img).unsqueeze(0).to(self.device)  # In range (0, 1)
             image_tensor = self.image_processor.preprocess(img, do_rescale=False, return_tensors='pt')['pixel_values']
