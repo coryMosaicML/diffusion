@@ -74,6 +74,9 @@ class LLaVAInference():
 
     def predict(self, model_requests: List[Dict[str, Any]]):
         results = []
+        print('-'*80)
+        print(model_requests)
+        print('-'*80)
         for req in model_requests:
             if 'input' not in req:
                 raise RuntimeError('"input" must be provided to generate call')
