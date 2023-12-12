@@ -25,6 +25,9 @@ LOCAL_CHECKPOINT_DIR = '/tmp/llava'
 def download_checkpoint(repo_id: str = 'liuhaotian/llava-v1.5-13b',
                         local_checkpoint_dir: str = LOCAL_CHECKPOINT_DIR) -> None:
     """Downloads the checkpoint to the local directory."""
+    # Make the local checkpoint directory if it doesn't exist
+    os.makedirs(local_checkpoint_dir, exist_ok=True)
+    # Download the checkpoint
     snapshot_download(
         repo_id=repo_id,
         local_dir=local_checkpoint_dir,
