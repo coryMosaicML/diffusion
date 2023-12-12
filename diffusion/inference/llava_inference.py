@@ -95,7 +95,7 @@ class LLaVAInference():
             # Forward through the model
             with torch.inference_mode():
                 output_ids = self.model.generate(input_ids,
-                                                 images=image_tensor.half().cuda(),
+                                                 images=image_tensor.half().to(self.device),
                                                  do_sample=True if self.temperature > 0 else False,
                                                  temperature=self.temperature,
                                                  top_p=self.top_p,
