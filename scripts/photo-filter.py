@@ -31,6 +31,7 @@ parser.add_argument('--locals', nargs='+', help='List of local directories to us
 parser.add_argument('--output', help='Output path for the filtered dataset.')
 parser.add_argument('--aesthetics_threshold', type=float, default=6.5, help='Aesthetics threshold for filtering.')
 parser.add_argument('--generate_caption', action='store_true', help='Whether to generate a caption for the image.')
+parser.add_argument('--max_size', type=int, default=1024, help='Maximum image side length.')
 args = parser.parse_args()
 
 
@@ -64,13 +65,20 @@ class MLP(torch.nn.Module):
 class DatasetFilter():
     """Filter a dataset based on a set of model predictions."""
 
-    def __init__(self, remotes, locals, output, aesthetics_threshold: float = 5.0, generate_caption: bool = True):
+    def __init__(self,
+                 remotes,
+                 locals,
+                 output,
+                 aesthetics_threshold: float = 5.0,
+                 generate_caption: bool = True,
+                 max_size: int = 1024):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.remotes = remotes
         self.locals = locals
         self.output = output
         self.aesthetics_threshold = aesthetics_threshold
         self.generate_caption = generate_caption
+        self.max_size = max_size
         # Make the dataset
         self.dataset = self._make_dataset()
         # Load the aesthetics v2 model
@@ -105,6 +113,25 @@ class DatasetFilter():
         )
         return dataset
 
+    def _resize_image(self, image):
+        """Resize an image such that the largest dimension is no bigger than size."""
+        # Shortcut to avoid resizing
+        if max(image.size) <= self.max_size:
+            return image
+
+        if image.size[0] > image.size[1]:
+            # If width is bigger than height, resize to width = size
+            height_size = int(self.max_size * image.size[1] / image.size[0])
+            resized_image = image.resize((self.max_size, height_size), Image.ANTIALIAS)
+        elif image.size[0] < image.size[1]:
+            # If height is bigger than width, resize to height = size
+            width_size = int(self.max_size * image.size[0] / image.size[1])
+            resized_image = image.resize((width_size, self.max_size), Image.ANTIALIAS)
+        else:
+            # If height and width are equal, resize to size x size
+            resized_image = image.resize((self.max_size, self.max_size), Image.ANTIALIAS)
+        return resized_image
+
     def _load_aesthetics_v2(self):
         """Loads the aesthetics v2 model."""
         aesthetics_model = MLP(768)
@@ -123,9 +150,10 @@ class DatasetFilter():
 
     def get_aesthetics_score(self, image: Image.Image):
         """Get the aesthetics score for an image."""
-        image = self.preprocess(image).unsqueeze(0).to(self.device)
+        resized_image = self._resize_image(image)
+        resized_image = self.preprocess(resized_image).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            image_features = self.clip_model.encode_image(image)
+            image_features = self.clip_model.encode_image(resized_image)
         im_emb_arr = self._normalized(image_features.cpu().detach().numpy())
         prediction = self.aesthetics_model(torch.from_numpy(im_emb_arr).to(self.device).type(torch.float32))
         return prediction.item()
@@ -188,11 +216,13 @@ class DatasetFilter():
         return output_text
 
     def _llava_classify_photo(self, image):
-        llava_output = self._get_llava_output(image, 'Is this image a photo? Respond with yes or no.')
+        llava_image = self._resize_image(image)
+        llava_output = self._get_llava_output(llava_image, 'Is this image a photo? Respond with yes or no.')
         return llava_output.lower() == 'yes'
 
     def _llava_classify_watermark(self, image):
-        llava_output = self._get_llava_output(image, 'Does this image have a watermark? Respond with yes or no.')
+        llava_image = self._resize_image(image)
+        llava_output = self._get_llava_output(llava_image, 'Does this image have a watermark? Respond with yes or no.')
         return llava_output.lower() == 'yes'
 
     def _llava_caption(self, image, alt_text=None):
@@ -204,24 +234,30 @@ class DatasetFilter():
             query += f' Include nouns from the following if relevant: {alt_text}'
         query += ' Do not use complete sentences.'
 
-        llava_output = self._get_llava_output(image, query)
+        llava_image = self._resize_image(image)
+        llava_output = self._get_llava_output(llava_image, query)
         return llava_output
 
     def _check_duplicate(self, image):
-        hash = imagehash.phash(image)
-        if hash in self.hashes:
-            return True
-        self.hashes[hash] = True
-        return False
+        # Check a perceptual hash
+        phash = imagehash.phash(image)
+        if phash in self.hashes:
+            is_duplicate = True
+        else:
+            is_duplicate = False
+        self.hashes[phash] = True
+        return is_duplicate
 
     def filter_data(self):
         ctr = 0
-        print('Total dataset length', len(self.dataset))
+        found_images = 0
+        length = len(self.dataset)
+        print('Total dataset length', length)
         with MDSWriter(out=self.output, columns=self.fields) as out:
             for sample in self.dataset:
                 ctr += 1
                 if ctr % 1000 == 0:
-                    print(f'Processed {ctr} samples.')
+                    print(f'Processed {ctr} of {length} samples. Found {found_images} images.')
                 image = sample['image']
                 prompt = sample['captions']
                 # Untokenize the prompt
@@ -252,12 +288,13 @@ class DatasetFilter():
                     mds_sample['llava_caption'] = llava_caption
                 print('-' * 80)
                 out.write(mds_sample)
-
+                found_images += 1
 
 # Filter dataset
 filter = DatasetFilter(args.remotes,
                        args.locals,
                        args.output,
                        aesthetics_threshold=args.aesthetics_threshold,
-                       generate_caption=args.generate_caption)
+                       generate_caption=args.generate_caption,
+                       max_size=args.max_size)
 filter.filter_data()
