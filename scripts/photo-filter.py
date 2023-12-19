@@ -133,12 +133,11 @@ class DatasetFilter():
     def _load_llava(self):
         """Loads the llava model."""
         # Download the llava model if it isn't there already.
-        if not os.listdir('/tmp/llava'):
-            snapshot_download(
-                repo_id='liuhaotian/llava-v1.5-13b',
-                local_dir='/tmp/llava',
-                local_dir_use_symlinks=False,
-            )
+        snapshot_download(
+            repo_id='liuhaotian/llava-v1.5-13b',
+            local_dir='/tmp/llava',
+            local_dir_use_symlinks=False,
+        )
         disable_torch_init()
         model_path = os.path.expanduser('/tmp/llava')
         model_name = get_model_name_from_path(model_path)
