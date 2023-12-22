@@ -29,6 +29,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--remotes', nargs='+', help='List of remotes to use for the dataset.')
 parser.add_argument('--locals', nargs='+', help='List of local directories to use for the dataset.')
 parser.add_argument('--output', help='Output path for the filtered dataset.')
+parser.add_argument('--image_key', type=str, default='jpg', help='Dataset image key.')
+parser.add_argument('--caption_key', type=str, default='jpg', help='Dataset caption key.')
 parser.add_argument('--aesthetics_threshold', type=float, default=6.5, help='Aesthetics threshold for filtering.')
 parser.add_argument('--generate_caption', action='store_true', help='Whether to generate a caption for the image.')
 parser.add_argument('--max_size', type=int, default=1024, help='Maximum image side length.')
@@ -69,6 +71,8 @@ class DatasetFilter():
                  remotes,
                  locals,
                  output,
+                 image_key: str = 'jpg',
+                 caption_key: str = 'caption',
                  aesthetics_threshold: float = 5.0,
                  generate_caption: bool = True,
                  max_size: int = 1024):
@@ -76,6 +80,8 @@ class DatasetFilter():
         self.remotes = remotes
         self.locals = locals
         self.output = output
+        self.image_key = image_key
+        self.caption_key = caption_key
         self.aesthetics_threshold = aesthetics_threshold
         self.generate_caption = generate_caption
         self.max_size = max_size
@@ -105,7 +111,8 @@ class DatasetFilter():
             streams=streams,
             tokenizer_name_or_path='stabilityai/stable-diffusion-2-base',
             caption_selection='first',
-            image_key='jpg',
+            image_key=self.image_key,
+            caption_key=self.caption_key,
             crop=None,
             download_timeout=120,
             transform=transform,
@@ -290,10 +297,13 @@ class DatasetFilter():
                 out.write(mds_sample)
                 found_images += 1
 
+
 # Filter dataset
 filter = DatasetFilter(args.remotes,
                        args.locals,
                        args.output,
+                       image_key=args.image_key,
+                       caption_key=args.caption_key,
                        aesthetics_threshold=args.aesthetics_threshold,
                        generate_caption=args.generate_caption,
                        max_size=args.max_size)
