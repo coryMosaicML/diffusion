@@ -19,9 +19,77 @@ from torch.utils.data import DataLoader
 from torchmetrics.multimodal import CLIPScore
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
-from transformers import PreTrainedTokenizerBase
+from transformers import AutoModel, AutoProcessor, PreTrainedTokenizerBase
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+
+class PickScoreMetric:
+    """Metrics-like class for computing PickScore."""
+
+    def __init__(self):
+        # Create the PickScore model
+        self.pickscore_processor = AutoProcessor.from_pretrained('laion/CLIP-ViT-H-14-laion2B-s32B-b79K')
+        self.pickscore_model = AutoModel.from_pretrained('yuvalkirstain/PickScore_v1').eval()
+        self.device = None
+        self.scores = []
+
+    def to(self, device):
+        self.device = device
+        self.pickscore_model.to(device)
+        return self
+
+    def _pickscore_image_pair(self, prompt: str, real_image, gen_image):
+        """Function that takes in a prompt and a pair of PIL image and returns the pick score of the generated image."""
+        # preprocess
+        image_inputs = self.pickscore_processor(
+            images=[real_image, gen_image],
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors='pt',
+        ).to(self.device)
+
+        text_inputs = self.pickscore_processor(
+            text=prompt,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors='pt',
+        ).to(self.device)
+
+        with torch.no_grad():
+            # embed
+            image_embs = self.pickscore_model.get_image_features(**image_inputs)
+            image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
+
+            text_embs = self.pickscore_model.get_text_features(**text_inputs)
+            text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
+
+            # score
+            scores = self.pickscore_model.logit_scale.exp() * (text_embs @ image_embs.T)[0]
+
+            #get probabilities
+            probs = torch.softmax(scores, dim=-1)
+            print(prompt)
+            print(probs[0].item(), probs[1].item())
+            print('-' * 80)
+        return probs[-1].item()
+
+    def update(self, prompts: List[str], real_images: torch.Tensor, gen_images: torch.Tensor):
+        """Update the PickScore metric with a batch of prompts, real images, and generated images."""
+        for prompt, real_image, gen_image in zip(prompts, real_images, gen_images):
+            real_image = to_pil_image(real_image)
+            gen_image = to_pil_image(gen_image)
+            self.scores.append(self._pickscore_image_pair(prompt, real_image, gen_image))
+
+    def compute(self):
+        """Compute the PickScore metric."""
+        return sum(self.scores) / len(self.scores)
+
+    def reset(self):
+        """Reset the PickScore metric."""
+        self.scores = []
 
 
 class CleanFIDEvaluator:
@@ -109,6 +177,9 @@ class CleanFIDEvaluator:
         # Predownload the CLIP model for computing clip-fid
         _, _ = clip.load('ViT-B/32', device=self.device)
 
+        # Create the pickscore metric
+        self.pickscore_metric = PickScoreMetric().to(self.device)
+
     def _generate_images(self, guidance_scale: float):
         """Core image generation function. Generates images at a given guidance scale.
 
@@ -123,8 +194,9 @@ class CleanFIDEvaluator:
         if not os.path.exists(gen_image_path) and dist.get_local_rank() == 0:
             os.makedirs(gen_image_path)
 
-        # Reset the CLIP metric
+        # Reset metrics
         self.clip_metric.reset()
+        self.pickscore_metric.reset()
 
         # Storage for prompts
         prompts = {}
@@ -163,7 +235,9 @@ class CleanFIDEvaluator:
                 text_captions = self.tokenizer.tokenizer.batch_decode(captions[:, 0, :], skip_special_tokens=True)
             else:
                 text_captions = self.tokenizer.batch_decode(captions, skip_special_tokens=True)
+            # Update the metrics
             self.clip_metric.update((generated_images * 255).to(torch.uint8), text_captions)
+            self.pickscore_metric.update(text_captions, real_images, generated_images)
             # Save the real images
             # Verify that the real images are in the proper range
             if real_images.min() < 0.0 or real_images.max() > 1.0:
@@ -198,7 +272,10 @@ class CleanFIDEvaluator:
         clip_score = self.clip_metric.compute()
         metrics['CLIP-score'] = clip_score
         print(f'{guidance_scale} CLIP score: {clip_score}')
-
+        # PickScore
+        pickscore = self.pickscore_metric.compute()
+        metrics['PickScore'] = pickscore
+        print(f'{guidance_scale} PickScore: {pickscore}')
         # Need to tell clean-fid which device to use
         device = torch.device(self.device)
         # Standard FID
