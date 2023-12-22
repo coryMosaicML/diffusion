@@ -41,7 +41,7 @@ class PickScoreMetric:
 
     def _pickscore_image_pair(self, prompt: str, real_image, gen_image):
         """Function that takes in a prompt and a pair of PIL image and returns the pick score of the generated image."""
-        # preprocess
+        # Preprocess images
         image_inputs = self.pickscore_processor(
             images=[real_image, gen_image],
             padding=True,
@@ -49,7 +49,7 @@ class PickScoreMetric:
             max_length=77,
             return_tensors='pt',
         ).to(self.device)
-
+        # Preprocess prompts
         text_inputs = self.pickscore_processor(
             text=prompt,
             padding=True,
@@ -59,21 +59,16 @@ class PickScoreMetric:
         ).to(self.device)
 
         with torch.no_grad():
-            # embed
+            # Embed images
             image_embs = self.pickscore_model.get_image_features(**image_inputs)
             image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
-
+            # Embed prompts
             text_embs = self.pickscore_model.get_text_features(**text_inputs)
             text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
-
-            # score
+            # Combine embeddings to get the score
             scores = self.pickscore_model.logit_scale.exp() * (text_embs @ image_embs.T)[0]
-
-            #get probabilities
+            # Calculate pick probs
             probs = torch.softmax(scores, dim=-1)
-            print(prompt)
-            print(probs[0].item(), probs[1].item())
-            print('-' * 80)
         return probs[-1].item()
 
     def update(self, prompts: List[str], real_images: torch.Tensor, gen_images: torch.Tensor):
