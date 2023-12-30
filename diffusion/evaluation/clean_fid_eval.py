@@ -19,72 +19,11 @@ from torch.utils.data import DataLoader
 from torchmetrics.multimodal import CLIPScore
 from torchvision.transforms.functional import to_pil_image
 from tqdm.auto import tqdm
-from transformers import AutoModel, AutoProcessor, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
+
+from diffusion.evaluation.pickscore_metric import PickScoreMetric
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
-
-class PickScoreMetric:
-    """Metrics-like class for computing PickScore."""
-
-    def __init__(self):
-        # Create the PickScore model
-        self.pickscore_processor = AutoProcessor.from_pretrained('laion/CLIP-ViT-H-14-laion2B-s32B-b79K')
-        self.pickscore_model = AutoModel.from_pretrained('yuvalkirstain/PickScore_v1').eval()
-        self.device = None
-        self.scores = []
-
-    def to(self, device):
-        self.device = device
-        self.pickscore_model.to(device)
-        return self
-
-    def _pickscore_image_pair(self, prompt: str, real_image, gen_image):
-        """Function that takes in a prompt and a pair of PIL image and returns the pick score of the generated image."""
-        # Preprocess images
-        image_inputs = self.pickscore_processor(
-            images=[real_image, gen_image],
-            padding=True,
-            truncation=True,
-            max_length=77,
-            return_tensors='pt',
-        ).to(self.device)
-        # Preprocess prompts
-        text_inputs = self.pickscore_processor(
-            text=prompt,
-            padding=True,
-            truncation=True,
-            max_length=77,
-            return_tensors='pt',
-        ).to(self.device)
-
-        with torch.no_grad():
-            # Embed images
-            image_embs = self.pickscore_model.get_image_features(**image_inputs)
-            image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
-            # Embed prompts
-            text_embs = self.pickscore_model.get_text_features(**text_inputs)
-            text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
-            # Combine embeddings to get the score
-            scores = self.pickscore_model.logit_scale.exp() * (text_embs @ image_embs.T)[0]
-            # Calculate pick probs
-            probs = torch.softmax(scores, dim=-1)
-        return probs[-1].item()
-
-    def update(self, prompts: List[str], real_images: torch.Tensor, gen_images: torch.Tensor):
-        """Update the PickScore metric with a batch of prompts, real images, and generated images."""
-        for prompt, real_image, gen_image in zip(prompts, real_images, gen_images):
-            real_image = to_pil_image(real_image)
-            gen_image = to_pil_image(gen_image)
-            self.scores.append(self._pickscore_image_pair(prompt, real_image, gen_image))
-
-    def compute(self):
-        """Compute the PickScore metric."""
-        return sum(self.scores) / len(self.scores)
-
-    def reset(self):
-        """Reset the PickScore metric."""
-        self.scores = []
 
 
 class CleanFIDEvaluator:
