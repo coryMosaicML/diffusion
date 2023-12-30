@@ -104,9 +104,10 @@ class PickScoreEvaluator:
 
         # Load the baseline model
         if self.baseline_load_path is not None:
-            with dist.run_local_rank_zero_first():
-                if dist.get_local_rank() == 0:
-                    get_file(path=self.baseline_load_path, destination=LOCAL_BASELINE_CHECKPOINT_PATH)
+            if dist.get_local_rank() == 0:
+                get_file(path=self.baseline_load_path, destination=LOCAL_BASELINE_CHECKPOINT_PATH)
+            else:
+                dist.local_rank_zero_download_and_wait(LOCAL_BASELINE_CHECKPOINT_PATH)
             state_dict = torch.load(LOCAL_BASELINE_CHECKPOINT_PATH)
             for key in list(state_dict['state']['model'].keys()):
                 if 'val_metrics.' in key:
@@ -116,10 +117,11 @@ class PickScoreEvaluator:
 
         # Load the model, leaving it on CPU for now.
         if self.model_load_path is not None:
-            with dist.run_local_rank_zero_first():
-                # SKIP DOWNLOADING IF THE FILE EXISTS FOR DEBUGGING
-                if dist.get_local_rank() == 0 and not os.path.exists(LOCAL_MODEL_CHECKPOINT_PATH):
-                    get_file(path=self.model_load_path, destination=LOCAL_MODEL_CHECKPOINT_PATH)
+            # SKIP DOWNLOADING IF THE FILE EXISTS FOR DEBUGGING
+            if dist.get_local_rank() == 0 and not os.path.exists(LOCAL_MODEL_CHECKPOINT_PATH):
+                get_file(path=self.model_load_path, destination=LOCAL_MODEL_CHECKPOINT_PATH)
+            else:
+                dist.local_rank_zero_download_and_wait(LOCAL_MODEL_CHECKPOINT_PATH)
             state_dict = torch.load(LOCAL_MODEL_CHECKPOINT_PATH, map_location='cpu')
             for key in list(state_dict['state']['model'].keys()):
                 if 'val_metrics.' in key:
