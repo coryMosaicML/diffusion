@@ -104,7 +104,8 @@ class PickScoreEvaluator:
 
         # Load the baseline model
         if self.baseline_load_path is not None:
-            if dist.get_local_rank() == 0:
+            # SKIP DOWNLOADING IF THE FILE EXISTS FOR DEBUGGING
+            if dist.get_local_rank() == 0 and not os.path.exists(LOCAL_BASELINE_CHECKPOINT_PATH):
                 get_file(path=self.baseline_load_path, destination=LOCAL_BASELINE_CHECKPOINT_PATH)
             with dist.local_rank_zero_download_and_wait(LOCAL_BASELINE_CHECKPOINT_PATH):
                 state_dict = torch.load(LOCAL_BASELINE_CHECKPOINT_PATH)
@@ -112,7 +113,9 @@ class PickScoreEvaluator:
                     if 'val_metrics.' in key:
                         del state_dict['state']['model'][key]
                 self.baseline_model.load_state_dict(state_dict['state']['model'], strict=load_strict_model_weights)
+                del state_dict
         self.baseline_model.to(self.device)
+        self.baseline_model = self.baseline_model.eval()
 
         # Load the model, leaving it on CPU for now.
         if self.model_load_path is not None:
@@ -125,6 +128,8 @@ class PickScoreEvaluator:
                     if 'val_metrics.' in key:
                         del state_dict['state']['model'][key]
                 self.model.load_state_dict(state_dict['state']['model'], strict=load_strict_model_weights)
+                del state_dict
+        self.model = self.model.eval()
 
         # Create the pickscore metric
         self.pickscore_metric = PickScoreMetric()
