@@ -34,6 +34,8 @@ parser.add_argument('--caption_key', type=str, default='jpg', help='Dataset capt
 parser.add_argument('--aesthetics_threshold', type=float, default=6.5, help='Aesthetics threshold for filtering.')
 parser.add_argument('--generate_caption', action='store_true', help='Whether to generate a caption for the image.')
 parser.add_argument('--max_size', type=int, default=1024, help='Maximum image side length.')
+parser.add_argument('--start', type=int, default=0, help='Index of sample to start with.')
+parser.add_argument('--end', type=int, default=10000, help='Index of sample to end with.')
 args = parser.parse_args()
 
 
@@ -75,7 +77,9 @@ class DatasetFilter():
                  caption_key: str = 'caption',
                  aesthetics_threshold: float = 5.0,
                  generate_caption: bool = True,
-                 max_size: int = 1024):
+                 max_size: int = 1024,
+                 start: int = 0,
+                 end: int = 10000):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.remotes = remotes
         self.locals = locals
@@ -85,6 +89,8 @@ class DatasetFilter():
         self.aesthetics_threshold = aesthetics_threshold
         self.generate_caption = generate_caption
         self.max_size = max_size
+        self.start = start
+        self.end = end
         # Make the dataset
         self.dataset = self._make_dataset()
         # Load the aesthetics v2 model
@@ -261,7 +267,8 @@ class DatasetFilter():
         length = len(self.dataset)
         print('Total dataset length', length)
         with MDSWriter(out=self.output, columns=self.fields) as out:
-            for sample in self.dataset:
+            for sample_id in range(self.start, self.end + 1):
+                sample = self.dataset[sample_id]
                 ctr += 1
                 if ctr % 1000 == 0:
                     print(f'Processed {ctr} of {length} samples. Found {found_images} images.')
@@ -306,5 +313,7 @@ filter = DatasetFilter(args.remotes,
                        caption_key=args.caption_key,
                        aesthetics_threshold=args.aesthetics_threshold,
                        generate_caption=args.generate_caption,
-                       max_size=args.max_size)
+                       max_size=args.max_size,
+                       start=args.start,
+                       end=args.end)
 filter.filter_data()
