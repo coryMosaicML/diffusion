@@ -65,7 +65,7 @@ class PickScoreMetric(Metric):
             if isinstance(model_image, torch.Tensor):
                 model_image = to_pil_image(model_image)
             pickscore = self._pickscore_image_pair(prompt, baseline_image, model_image)
-            self.total_prob += pickscore  # type: ignore
+            self.total_prob += 1.0 if pickscore > 0.5 else 0.0  # type: ignore
             self.total_items += 1  # type: ignore
 
     def compute(self):
