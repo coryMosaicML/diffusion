@@ -234,15 +234,16 @@ class PickScoreEvaluator:
 
     def _generate_images_from_prompts(self, guidance_scale: float):
         """Generate images from prompts for visualization."""
+        generated_images = []
         if self.prompts:
-            with get_precision_context(self.precision):
-                generated_images = self.model.generate(prompt=self.prompts,
-                                                       height=self.height,
-                                                       width=self.width,
-                                                       guidance_scale=guidance_scale,
-                                                       seed=self.seed)  # type: ignore
-        else:
-            generated_images = []
+            for prompt in self.prompts:
+                with get_precision_context(self.precision):
+                    image = self.model.generate(prompt=prompt,
+                                                height=self.height,
+                                                width=self.width,
+                                                guidance_scale=guidance_scale,
+                                                seed=self.seed)  # type: ignore
+                    generated_images.append(image)
         return generated_images
 
     def evaluate(self):
