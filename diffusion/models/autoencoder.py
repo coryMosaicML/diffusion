@@ -250,6 +250,10 @@ class GaussianDistribution:
     def latent_dist(self):
         return self
 
+    def mode(self) -> torch.Tensor:
+        """Get the mode of the distribution."""
+        return self.mean
+
     def sample(self) -> torch.Tensor:
         """Sample from the distribution."""
         return self.mean + self.std * torch.randn_like(self.mean)
