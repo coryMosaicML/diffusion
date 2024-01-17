@@ -197,14 +197,14 @@ class StableDiffusion(ComposerModel):
                 with torch.cuda.amp.autocast(enabled=False):
                     # Encode the images to the latent space.
                     # Encode prompt into conditioning vector
-                    latents = self.vae.encode(inputs.half())['latent_dist'].sample().data
+                    latents = self.vae.encode(inputs.half())['latent_dist'].mode().data
                     if self.sdxl:
                         conditioning, pooled_conditioning = self.text_encoder([conditioning, conditioning_2])
                     else:
                         conditioning = self.text_encoder(conditioning)[0]  # Should be (batch_size, 77, 768)
 
             else:
-                latents = self.vae.encode(inputs)['latent_dist'].sample().data
+                latents = self.vae.encode(inputs)['latent_dist'].mode().data
                 if self.sdxl:
                     conditioning, pooled_conditioning = self.text_encoder([conditioning, conditioning_2])
                 else:
