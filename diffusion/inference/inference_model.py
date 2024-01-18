@@ -34,6 +34,7 @@ class StableDiffusionInference():
         pretrained (bool): Whether to load pretrained weights. Default: True.
         prediction_type (str): The type of prediction to use. Must be one of 'sample',
             'epsilon', or 'v_prediction'. Default: `epsilon`.
+        use_train_scheduler (bool): Whether to use the training scheduler. Default: False.
         local_checkpoint_path (str): Path to the local checkpoint. Default: '/tmp/model.pt'.
         **kwargs: Additional keyword arguments to pass to the model.
     """
@@ -42,6 +43,7 @@ class StableDiffusionInference():
                  model_name: str = 'stabilityai/stable-diffusion-2-base',
                  pretrained: bool = False,
                  prediction_type: str = 'epsilon',
+                 use_train_scheduler: bool = False,
                  local_checkpoint_path: str = LOCAL_CHECKPOINT_PATH,
                  **kwargs):
         self.device = torch.cuda.current_device()
@@ -63,6 +65,9 @@ class StableDiffusionInference():
             model.load_state_dict(state_dict['state']['model'], strict=False)
         model.to(self.device)
         self.model = model.eval()
+
+        if use_train_scheduler:
+            self.model.inference_noise_scheduler = self.model.noise_scheduler
 
     def predict(self, model_requests: List[Dict[str, Any]]):
         prompts = []
@@ -129,6 +134,7 @@ class StableDiffusionXLInference():
         pretrained (bool): Whether to load pretrained weights. Default: True.
         prediction_type (str): The type of prediction to use. Must be one of 'sample',
             'epsilon', or 'v_prediction'. Default: `epsilon`.
+        use_train_scheduler (bool): Whether to use the training scheduler. Default: False.
         **kwargs: Additional keyword arguments to pass to the model.
     """
 
@@ -139,6 +145,7 @@ class StableDiffusionXLInference():
                  clip_qkv: Optional[float] = None,
                  pretrained: bool = False,
                  prediction_type: str = 'epsilon',
+                 use_train_scheduler: bool = False,
                  local_checkpoint_path: str = LOCAL_CHECKPOINT_PATH,
                  **kwargs):
         self.device = torch.cuda.current_device()
@@ -163,6 +170,9 @@ class StableDiffusionXLInference():
             model.load_state_dict(state_dict['state']['model'], strict=False)
         model.to(self.device)
         self.model = model.eval()
+
+        if use_train_scheduler:
+            self.model.inference_noise_scheduler = self.model.noise_scheduler
 
     def predict(self, model_requests: List[Dict[str, Any]]):
         prompts = []
