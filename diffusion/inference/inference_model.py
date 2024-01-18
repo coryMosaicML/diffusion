@@ -67,7 +67,7 @@ class StableDiffusionInference():
         self.model = model.eval()
 
         if use_train_scheduler:
-            self.model.inference_noise_scheduler = self.model.noise_scheduler
+            self.model.inference_scheduler = self.model.noise_scheduler
 
     def predict(self, model_requests: List[Dict[str, Any]]):
         prompts = []
@@ -172,7 +172,7 @@ class StableDiffusionXLInference():
         self.model = model.eval()
 
         if use_train_scheduler:
-            self.model.inference_noise_scheduler = self.model.noise_scheduler
+            self.model.inference_scheduler = self.model.noise_scheduler
 
     def predict(self, model_requests: List[Dict[str, Any]]):
         prompts = []
