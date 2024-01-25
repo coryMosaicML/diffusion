@@ -41,6 +41,7 @@ class StableDiffusion(ComposerModel):
             'epsilon', or 'v_prediction'. Default: `epsilon`.
         offset_noise (float, optional): The scale of the offset noise. If not specified, offset noise will not
             be used. Default `None`.
+        quasirandom_timesteps (bool): Whether to use quasirandom timesteps. Default: `False`.
         train_metrics (list): List of torchmetrics to calculate during training.
             Default: `None`.
         val_metrics (list): List of torchmetrics to calculate during validation.
@@ -79,6 +80,7 @@ class StableDiffusion(ComposerModel):
                  loss_fn=F.mse_loss,
                  prediction_type: str = 'epsilon',
                  offset_noise: Optional[float] = None,
+                 quasirandom_timesteps: bool = False,
                  train_metrics: Optional[List] = None,
                  val_metrics: Optional[List] = None,
                  val_seed: int = 1138,
@@ -102,6 +104,7 @@ class StableDiffusion(ComposerModel):
         if self.prediction_type not in ['sample', 'epsilon', 'v_prediction']:
             raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
         self.offset_noise = offset_noise
+        self.quasirandom_timesteps = quasirandom_timesteps
         self.val_seed = val_seed
         self.image_key = image_key
         self.image_latents_key = image_latents_key
@@ -169,6 +172,10 @@ class StableDiffusion(ComposerModel):
             self.vae._fsdp_wrap = False
             self.unet._fsdp_wrap = True
 
+        # Setup for quasirandomness
+        if self.quasirandom_timesteps:
+            self.sobol_engine = torch.quasirandom.SobolEngine(dimension=1, scramble=True)
+
     def forward(self, batch):
         latents, conditioning, conditioning_2, pooled_conditioning = None, None, None, None
         # Use latents if specified and available. When specified, they might not exist during eval
@@ -218,7 +225,13 @@ class StableDiffusion(ComposerModel):
             encoder_attention_mask = None
 
         # Sample the diffusion timesteps
-        timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
+        if self.quasirandom_timesteps:
+            # Quasirandom timesteps between 0 and 1
+            timesteps = self.sobol_engine.draw(latents.shape[0]).squeeze(-1).to(latents.device)
+            # Scale to the number of timesteps and convert to int (use truncation)
+            timesteps = (len(self.noise_scheduler) * timesteps).int()
+        else:
+            timesteps = torch.randint(0, len(self.noise_scheduler), (latents.shape[0],), device=latents.device)
         # Add noise to the inputs (forward diffusion)
         noise = torch.randn_like(latents)
         if self.offset_noise is not None:

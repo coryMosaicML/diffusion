@@ -35,6 +35,7 @@ def stable_diffusion_2(
     pretrained: bool = True,
     prediction_type: str = 'epsilon',
     offset_noise: Optional[float] = None,
+    quasirandom_timesteps: bool = False,
     train_metrics: Optional[List] = None,
     val_metrics: Optional[List] = None,
     val_guidance_scales: Optional[List] = None,
@@ -69,6 +70,7 @@ def stable_diffusion_2(
         precomputed_latents (bool): Whether to use precomputed latents. Defaults to False.
         offset_noise (float, optional): The scale of the offset noise. If not specified, offset noise will not
             be used. Default `None`.
+        quasirandom_timesteps (bool): Whether to use quasirandom timesteps. Defaults to False.
         encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
         mask_pad_tokens (bool): Whether to mask pad tokens in cross attention. Defaults to False.
         fsdp (bool): Whether to use FSDP. Defaults to True.
@@ -121,6 +123,7 @@ def stable_diffusion_2(
         inference_noise_scheduler=inference_noise_scheduler,
         prediction_type=prediction_type,
         offset_noise=offset_noise,
+        quasirandom_timesteps=quasirandom_timesteps,
         train_metrics=train_metrics,
         val_metrics=val_metrics,
         val_guidance_scales=val_guidance_scales,
@@ -155,6 +158,7 @@ def stable_diffusion_xl(
     pretrained: bool = True,
     prediction_type: str = 'epsilon',
     offset_noise: Optional[float] = None,
+    quasirandom_timesteps: bool = False,
     train_metrics: Optional[List] = None,
     val_metrics: Optional[List] = None,
     val_guidance_scales: Optional[List] = None,
@@ -185,6 +189,7 @@ def stable_diffusion_xl(
             'epsilon', or 'v_prediction'. Default: `epsilon`.
         offset_noise (float, optional): The scale of the offset noise. If not specified, offset noise will not
             be used. Default `None`.
+        quasirandom_timesteps (bool): Whether to use quasirandom timesteps. Defaults to False.
         train_metrics (list, optional): List of metrics to compute during training. If None, defaults to
             [MeanSquaredError()].
         val_metrics (list, optional): List of metrics to compute during validation. If None, defaults to
@@ -262,6 +267,7 @@ def stable_diffusion_xl(
         inference_noise_scheduler=inference_noise_scheduler,
         prediction_type=prediction_type,
         offset_noise=offset_noise,
+        quasirandom_timesteps=quasirandom_timesteps,
         train_metrics=train_metrics,
         val_metrics=val_metrics,
         val_guidance_scales=val_guidance_scales,
