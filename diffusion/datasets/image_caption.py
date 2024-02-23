@@ -93,7 +93,10 @@ class StreamingImageCaptionDataset(StreamingDataset):
         if self.sdxl:
             self.tokenizer = SDXLTokenizer(tokenizer_name_or_path)
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, subfolder='tokenizer')
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, subfolder='tokenizer')
+            except Exception:
+                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)

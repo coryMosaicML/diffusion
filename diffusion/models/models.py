@@ -13,10 +13,12 @@ from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscrete
 from torchmetrics import MeanSquaredError
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.multimodal.clip_score import CLIPScore
-from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer, PretrainedConfig
+from transformers import (AutoModel, AutoTokenizer, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer,
+                          PretrainedConfig)
 
 from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, ComposerAutoEncoder,
                                           ComposerDiffusersAutoEncoder, load_autoencoder)
+from diffusion.models.latent_diffusion import LatentDiffusion
 from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttnProcessor, zero_module
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
@@ -376,6 +378,65 @@ def stable_diffusion_xl(
         log.info('Using %s with clip_val %.1f' % (attn_processor.__class__, clip_qkv))
         model.unet.set_attn_processor(attn_processor)
 
+    return model
+
+
+def latent_diffusion(
+    autoencoder_path: str,
+    autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
+    latent_means: Optional[Union[Tuple[float, ...], List[float]]] = None,
+    latent_stds: Optional[Union[Tuple[float, ...], List[float]]] = None,
+    encode_latents_in_fp16=True,
+    prediction_type: str = 'epsilon',
+):
+    """Setup for generic latent diffusion model.
+
+    Args:
+        autoencoder_path (str): Path to autoencoder weights.
+        autoencoder_local_path (str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
+        latent_means (tuple): Tuple of latent means. Default: `None`.
+        latent_stds (tuple): Tuple of latent standard deviations. Default: `None`.
+        encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
+        prediction_type (str): The type of prediction to use. Must be one of 'epsilon' or 'v_prediction'. Default: `epsilon`.
+    """
+    # Load the autoencoder
+    if encode_latents_in_fp16:
+        autoencoder, latent_statistics = load_autoencoder(autoencoder_path,
+                                                          autoencoder_local_path,
+                                                          torch_dtype=torch.float16)
+    else:
+        autoencoder, latent_statistics = load_autoencoder(autoencoder_path, autoencoder_local_path)
+    if latent_means is None and latent_statistics is not None:
+        latent_means = latent_statistics['latent_channel_means']
+    if latent_stds is None and latent_statistics is not None:
+        latent_stds = latent_statistics['latent_channel_stds']
+
+    # Load the text encoder and tokenizer
+    torch_dtype = torch.float16 if encode_latents_in_fp16 else None
+    tokenizer = AutoTokenizer.from_pretrained('intfloat/e5-large-v2')
+    text_encoder = AutoModel.from_pretrained('intfloat/e5-large-v2', torch_dtype=torch_dtype)
+
+    # For now, use the same config as SD2.
+    model_name = 'stabilityai/stable-diffusion-2-base'
+    # Load the unet
+    config = PretrainedConfig.get_config_dict(model_name, subfolder='unet')
+    new_config = config[0]
+    new_config['in_channels'] = autoencoder.config['latent_channels']
+    if prediction_type.lower() in ['both', 'all']:
+        new_config['out_channels'] = autoencoder.config['latent_channels'] * 2
+    else:
+        new_config['out_channels'] = autoencoder.config['latent_channels']
+    unet = UNet2DConditionModel(**new_config)
+
+    # Make the model
+    model = LatentDiffusion(model=unet,
+                            autoencoder=autoencoder,
+                            text_encoder=text_encoder,
+                            tokenizer=tokenizer,
+                            prediction_type=prediction_type,
+                            latent_means=tuple(latent_means) if latent_means is not None else None,
+                            latent_stds=tuple(latent_stds) if latent_stds is not None else None,
+                            encode_latents_in_fp16=encode_latents_in_fp16)
     return model
 
 
