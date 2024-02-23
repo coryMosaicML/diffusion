@@ -241,6 +241,8 @@ class GaussianDistribution:
             return self
         elif key == 'mean':
             return self.mean
+        elif key == 'sample':
+            return self.sample()
         elif key == 'log_var':
             return self.log_var
         else:
@@ -250,9 +252,16 @@ class GaussianDistribution:
     def latent_dist(self):
         return self
 
-    def sample(self) -> torch.Tensor:
-        """Sample from the distribution."""
-        return self.mean + self.std * torch.randn_like(self.mean)
+    def sample(self, use_mean=False) -> torch.Tensor:
+        """Sample from the distribution.
+
+        Args:
+            use_mean (bool): Whether to use the mean as a sample. Default: `False`.
+        """
+        if use_mean:
+            return self.mean
+        else:
+            return self.mean + self.std * torch.randn_like(self.mean)
 
 
 class AutoEncoderOutput:

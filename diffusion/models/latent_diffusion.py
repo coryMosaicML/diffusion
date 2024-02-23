@@ -45,6 +45,7 @@ class LatentDiffusion(ComposerModel):
         fsdp (bool): whether to use FSDP, Default: `False`.
         encode_latents_in_fp16 (bool): whether to encode latents in fp16.
             Default: `False`.
+        use_vae_mean (bool): whether to use the mean of the VAE for encoding latents instead of sampling. Default: `True`.
     """
 
     def __init__(
@@ -64,6 +65,7 @@ class LatentDiffusion(ComposerModel):
         attention_mask_key: str = 'attention_mask',
         fsdp: bool = False,
         encode_latents_in_fp16: bool = False,
+        use_vae_mean: bool = True,
     ):
         super().__init__()
         self.model = model
@@ -83,6 +85,7 @@ class LatentDiffusion(ComposerModel):
         self.attention_mask_key = attention_mask_key
         self.fsdp = fsdp
         self.encode_latents_in_fp16 = encode_latents_in_fp16
+        self.use_vae_mean = use_vae_mean
 
         # Set up metrics
         self.train_metrics = [MeanSquaredError()]
@@ -115,9 +118,9 @@ class LatentDiffusion(ComposerModel):
         if self.encode_latents_in_fp16:
             # Disable autocast context as models are in fp16
             with torch.cuda.amp.autocast(enabled=False):
-                latents = self.autoencoder.encode(images.half()).latent_dist.sample().data
+                latents = self.autoencoder.encode(images.half()).latent_dist.sample(use_mean=self.use_vae_mean).data
         else:
-            latents = self.autoencoder.encode(images).latent_dist.sample().data
+            latents = self.autoencoder.encode(images).latent_dist.sample(use_mean=self.use_vae_mean).data
         return latents
 
     def tokenize_text(self, text: Union[str, List[str]]):
@@ -245,6 +248,7 @@ class LatentDiffusion(ComposerModel):
 
     def loss(self, outputs, batch):
         """MSE loss between outputs and targets."""
+        losses = {}
         if self.prediction_type == 'all':
             pred_latents, pred_noise, = outputs['predictions'].chunk(2, dim=1)
             targ_latents, targ_noise, targ_v = outputs['targets'].chunk(3, dim=1)
@@ -254,12 +258,19 @@ class LatentDiffusion(ComposerModel):
             sin_t = torch.sin(angle).view(-1, 1, 1, 1)
             pred_v = -sin_t * pred_latents + cos_t * pred_noise
             # Compute MSE loss
-            sample_loss = F.mse_loss(pred_latents, targ_latents)
-            noise_loss = F.mse_loss(pred_noise, targ_noise)
-            v_loss = F.mse_loss(pred_v, targ_v)
-            return (sample_loss + noise_loss + v_loss) / 3
+            losses['sample_loss'] = F.mse_loss(pred_latents, targ_latents)
+            losses['noise_loss'] = F.mse_loss(pred_noise, targ_noise)
+            losses['v_loss'] = F.mse_loss(pred_v, targ_v)
+            losses['total'] = (losses['sample_loss'] + losses['noise_loss'] + losses['v_loss']) / 3
+        elif self.prediction_type == 'both':
+            pred_latents, pred_noise = outputs['predictions'].chunk(2, dim=1)
+            targ_latents, targ_noise = outputs['targets'].chunk(2, dim=1)
+            losses['sample_loss'] = F.mse_loss(pred_latents, targ_latents)
+            losses['noise_loss'] = F.mse_loss(pred_noise, targ_noise)
+            losses['total'] = (losses['sample_loss'] + losses['noise_loss']) / 2
         else:
-            return F.mse_loss(outputs['predictions'], outputs['targets'])
+            losses['total'] = F.mse_loss(outputs['predictions'], outputs['targets'])
+        return losses
 
     def eval_forward(self, batch, outputs=None):
         # Skip this if outputs have already been computed, e.g. during training
