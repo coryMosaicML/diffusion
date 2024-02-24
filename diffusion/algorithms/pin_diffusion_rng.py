@@ -10,7 +10,7 @@ from composer.core import Algorithm, Event, State
 from composer.loggers import Logger
 from composer.utils import dist
 
-from diffusion.models import StableDiffusion
+from diffusion.models import LatentDiffusion, StableDiffusion
 
 
 class PinDiffusionRNG(Algorithm):
@@ -33,7 +33,7 @@ class PinDiffusionRNG(Algorithm):
             model = state.model.module
         else:
             raise ValueError('Model does not have an rng_generator')
-        assert isinstance(model, StableDiffusion)
+        assert isinstance(model, (LatentDiffusion, StableDiffusion))
 
         if event == Event.INIT:
             # Create the RNG generators

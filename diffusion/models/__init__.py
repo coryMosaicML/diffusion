@@ -3,6 +3,7 @@
 
 """Diffusion models."""
 
+from diffusion.models.latent_diffusion import LatentDiffusion
 from diffusion.models.models import (build_autoencoder, build_diffusers_autoencoder, continuous_pixel_diffusion,
                                      discrete_pixel_diffusion, stable_diffusion_2, stable_diffusion_xl)
 from diffusion.models.pixel_diffusion import PixelDiffusion
@@ -14,6 +15,7 @@ __all__ = [
     'continuous_pixel_diffusion',
     'discrete_pixel_diffusion',
     'PixelDiffusion',
+    'LatentDiffusion',
     'stable_diffusion_2',
     'stable_diffusion_xl',
     'StableDiffusion',
