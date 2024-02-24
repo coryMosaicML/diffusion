@@ -451,6 +451,9 @@ def latent_diffusion(
                             downsample_factor=downsample_factor,
                             encode_latents_in_fp16=encode_latents_in_fp16,
                             fsdp=fsdp)
+
+    if torch.cuda.is_available():
+        model = DeviceGPU().module_to_device(model)
     return model
 
 
