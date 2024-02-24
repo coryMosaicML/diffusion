@@ -13,8 +13,7 @@ from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscrete
 from torchmetrics import MeanSquaredError
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.multimodal.clip_score import CLIPScore
-from transformers import (AutoModel, AutoTokenizer, CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer,
-                          PretrainedConfig)
+from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer, PretrainedConfig
 
 from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, ComposerAutoEncoder,
                                           ComposerDiffusersAutoEncoder, load_autoencoder)
@@ -399,11 +398,12 @@ def latent_diffusion(
         encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
         prediction_type (str): The type of prediction to use. Must be one of 'epsilon' or 'v_prediction'. Default: `epsilon`.
     """
+    torch_dtype = torch.float16 if encode_latents_in_fp16 else None
     # Load the autoencoder
     if encode_latents_in_fp16:
         autoencoder, latent_statistics = load_autoencoder(autoencoder_path,
                                                           autoencoder_local_path,
-                                                          torch_dtype=torch.float16)
+                                                          torch_dtype=torch_dtype)
     else:
         autoencoder, latent_statistics = load_autoencoder(autoencoder_path, autoencoder_local_path)
     if latent_means is None and latent_statistics is not None:
@@ -411,13 +411,12 @@ def latent_diffusion(
     if latent_stds is None and latent_statistics is not None:
         latent_stds = latent_statistics['latent_channel_stds']
 
+    # For now, use the same config as SDXL.
+    model_name = 'stabilityai/stable-diffusion-xl-base-1.0'
     # Load the text encoder and tokenizer
-    torch_dtype = torch.float16 if encode_latents_in_fp16 else None
-    tokenizer = AutoTokenizer.from_pretrained('intfloat/e5-large-v2')
-    text_encoder = AutoModel.from_pretrained('intfloat/e5-large-v2', torch_dtype=torch_dtype)
+    tokenizer = SDXLTokenizer(model_name)
+    text_encoder = SDXLTextEncoder(model_name, encode_latents_in_fp16)
 
-    # For now, use the same config as SD2.
-    model_name = 'stabilityai/stable-diffusion-2-base'
     # Load the unet
     config = PretrainedConfig.get_config_dict(model_name, subfolder='unet')
     new_config = config[0]

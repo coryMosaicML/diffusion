@@ -128,20 +128,45 @@ class LatentDiffusion(ComposerModel):
         if isinstance(text, str):
             text = [text]
         tokenizer_out = self.tokenizer(text, padding='max_length', truncation=True, return_tensors='pt')
-        return tokenizer_out.input_ids, tokenizer_out.attention_mask
+        if type(tokenizer_out.input_ids) == list:
+            input_ids = torch.cat([t.unsqueeze(1) for t in tokenizer_out.input_ids], dim=1)
+            # Take union over both tokenizers padding masks
+            attention_masks = tokenizer_out.attention_mask
+            attention_mask = torch.logical_or(attention_masks[0], attention_masks[1]).to(attention_masks[0].dtype)
+        elif type(tokenizer_out.input_ids) == torch.Tensor:
+            input_ids = tokenizer_out.input_ids
+            attention_mask = tokenizer_out.attention_mask
+        else:
+            raise ValueError(f'Unrecognized tokenizer output type {type(tokenizer_out.input_ids)}')
+        return input_ids, attention_mask
 
     def embed_text(self, tokenized_text, attention_mask):
         """Get the text embeddings from the text encoder(s).
 
-        Tokenized text is expected to be of shape (batch_size, sequence_length).
+        Tokenized text is expected to be of shape (batch_size, sequence_length) for a single tokenizer,
+        or (batch_size, num_tokenizers, sequence_length) for multiple tokenizers.
         """
         # Ensure that the tokenized text is on the same device as the text encoder
         tokenized_text = tokenized_text.to(self.text_encoder.device)
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.text_encoder.device)
-        # Embed the text.
-        conditioning = self.text_encoder(tokenized_text, attention_mask=attention_mask)[0]
-        return conditioning
+        # There are possibly multiple text tokenizations depending on the model. Get them all.
+        if tokenized_text.ndim > 2:
+            conditionings = [tokenized_text[:, i, :] for i in range(tokenized_text.shape[1])]
+            conditionings = [c.view(-1, c.shape[-1]) for c in conditionings]
+        elif tokenized_text.ndim <= 2:
+            conditionings = [tokenized_text]
+        else:
+            raise ValueError('Invalid tokenized text shape.')
+        # Embed the text. In the event there are multiple tokenizations the text encoder expects a list.
+        if len(conditionings) > 1:
+            conditioning, pooled_conditioning = self.text_encoder(conditionings)
+        elif len(conditionings) == 1:
+            conditioning = self.text_encoder(conditionings[0], attention_mask=attention_mask)[0]
+            pooled_conditioning = None
+        else:
+            raise ValueError('No conditioning vectors were found.')
+        return conditioning, pooled_conditioning
 
     def init_latent_stats(self, latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Init the means
@@ -225,10 +250,12 @@ class LatentDiffusion(ComposerModel):
         # Scale the latents by their means and standard deviations
         latents = self.scale_latents(latents)
         # Prep the text embeddings
-        conditioning = self.embed_text(tokenized_text, attention_mask)
+        conditioning, pooled_conditioning = self.embed_text(tokenized_text, attention_mask)
         # Zero dropped captions if needed
         if 'drop_caption_mask' in batch:
             conditioning *= batch['drop_caption_mask'].view(-1, 1, 1)
+            if pooled_conditioning is not None:
+                pooled_conditioning *= batch['drop_caption_mask'].view(-1, 1)
         # Diffusion forward process
         noised_latents, targets, timesteps = self.diffusion_forward_process(latents)
         # Optional additional conditioning
@@ -236,7 +263,7 @@ class LatentDiffusion(ComposerModel):
         if all(k in batch for k in self.additional_cond_keys):
             add_time_ids = torch.cat(
                 [batch['cond_original_size'], batch['cond_crops_coords_top_left'], batch['cond_target_size']], dim=1)
-            add_text_embeds = None
+            add_text_embeds = pooled_conditioning
             added_cond_kwargs = {'text_embeds': add_text_embeds, 'time_ids': add_time_ids}
         # Forward through the model
         model_out = self.model(noised_latents,
@@ -395,10 +422,11 @@ class LatentDiffusion(ComposerModel):
 
         # Create the prompt embeddings
         tokenized_prompts, tokenized_prompts_pad_mask = self.tokenize_text(prompt)
-        text_embeddings = self.embed_text(tokenized_prompts, tokenized_prompts_pad_mask)
+        text_embeddings, pooled_text_embeddings = self.embed_text(tokenized_prompts, tokenized_prompts_pad_mask)
         # Create the negative prompt embeddings
         tokenized_negative_prompts, tokenized_negative_prompts_pad_mask = self.tokenize_text(negative_prompt)
-        negative_prompt_embeds = self.embed_text(tokenized_negative_prompts, tokenized_negative_prompts_pad_mask)
+        negative_prompt_embeds, pooled_negative_prompt_embeds = self.embed_text(tokenized_negative_prompts,
+                                                                                tokenized_negative_prompts_pad_mask)
         # Concatenate prompt and negative prompt
         text_embeddings = torch.cat([negative_prompt_embeds, text_embeddings])
         if tokenized_prompts_pad_mask is not None:
@@ -406,6 +434,10 @@ class LatentDiffusion(ComposerModel):
             attention_masks = attention_masks.to(device)
         else:
             attention_masks = None
+        if pooled_text_embeddings is not None and pooled_negative_prompt_embeds is not None:
+            pooled_embeddings = torch.cat([pooled_negative_prompt_embeds, pooled_text_embeddings])  # type: ignore
+        else:
+            pooled_embeddings = None
 
         # Generate initial randomness for the diffusion process
         batch_size = len(prompt)
@@ -418,6 +450,12 @@ class LatentDiffusion(ComposerModel):
         # Make the additional conditioning params
         added_cond_kwargs = {}
         # Optionally prepare added time ids & embeddings
+        if pooled_embeddings is not None:
+            added_cond_kwargs['text_embeds'] = pooled_embeddings
+            if crop_params is None:
+                crop_params = torch.zeros((batch_size, 2), dtype=text_embeddings.dtype)
+            if input_size_params is None:
+                input_size_params = torch.tensor([width, height], dtype=text_embeddings.dtype).repeat(batch_size, 1)
         if crop_params is not None and input_size_params is not None:
             crop_params = torch.cat([crop_params, crop_params])
             input_size_params = torch.cat([input_size_params, input_size_params])
