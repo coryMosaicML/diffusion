@@ -387,6 +387,7 @@ def latent_diffusion(
     latent_stds: Optional[Union[Tuple[float, ...], List[float]]] = None,
     encode_latents_in_fp16=True,
     prediction_type: str = 'epsilon',
+    fsdp: bool = True,
 ):
     """Setup for generic latent diffusion model.
 
@@ -397,6 +398,7 @@ def latent_diffusion(
         latent_stds (tuple): Tuple of latent standard deviations. Default: `None`.
         encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
         prediction_type (str): The type of prediction to use. Must be one of 'epsilon' or 'v_prediction'. Default: `epsilon`.
+        fsdp (bool): Whether to use FSDP. Defaults to True.
     """
     torch_dtype = torch.float16 if encode_latents_in_fp16 else None
     # Load the autoencoder
@@ -410,6 +412,7 @@ def latent_diffusion(
         latent_means = latent_statistics['latent_channel_means']
     if latent_stds is None and latent_statistics is not None:
         latent_stds = latent_statistics['latent_channel_stds']
+    downsample_factor = 2**(len(autoencoder.config['channel_multipliers']) - 1)
 
     # For now, use the same config as SDXL.
     model_name = 'stabilityai/stable-diffusion-xl-base-1.0'
@@ -426,6 +429,16 @@ def latent_diffusion(
     else:
         new_config['out_channels'] = autoencoder.config['latent_channels']
     unet = UNet2DConditionModel(**new_config)
+    # Zero initialization trick
+    for name, layer in unet.named_modules():
+        # Final conv in ResNet blocks
+        if name.endswith('conv2'):
+            layer = zero_module(layer)
+        # proj_out in attention blocks
+        if name.endswith('to_out.0'):
+            layer = zero_module(layer)
+    # Last conv block out projection
+    unet.conv_out = zero_module(unet.conv_out)
 
     # Make the model
     model = LatentDiffusion(model=unet,
@@ -435,7 +448,9 @@ def latent_diffusion(
                             prediction_type=prediction_type,
                             latent_means=tuple(latent_means) if latent_means is not None else None,
                             latent_stds=tuple(latent_stds) if latent_stds is not None else None,
-                            encode_latents_in_fp16=encode_latents_in_fp16)
+                            downsample_factor=downsample_factor,
+                            encode_latents_in_fp16=encode_latents_in_fp16,
+                            fsdp=fsdp)
     return model
 
 
