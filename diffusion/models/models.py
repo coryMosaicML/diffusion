@@ -20,6 +20,7 @@ from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, Composer
 from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttnProcessor, zero_module
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
+from diffusion.models.transformer import ComposerDiffusionTransformer, DiffusionTransformer
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
 
 try:
@@ -377,6 +378,71 @@ def stable_diffusion_xl(
         model.unet.set_attn_processor(attn_processor)
 
     return model
+
+
+def DiT(
+    num_features: int = 1024,
+    num_heads: int = 16,
+    num_layers: int = 3,
+    input_features: int = 768,
+    input_max_sequence_length: int = 1024,
+    input_dimension: int = 2,
+    conditioning_features: int = 1024,
+    conditioning_max_sequence_length: int = 77,
+    conditioning_dimension: int = 1,
+    expansion_factor: int = 4,
+    prediction_type: str = 'epsilon',
+    T_max: int = 1000,
+    input_key: str = 'input',
+    input_coords_key: str = 'input_coords',
+    input_mask_key: str = 'input_mask',
+    conditioning_key: str = 'conditioning',
+    conditioning_coords_key: str = 'conditioning_coords',
+    conditioning_mask_key: str = 'conditioning_mask',
+):
+    """Diffusion Transformer training setup.
+
+    Args:
+        num_features (int): Number of features. Default: `1024`.
+        num_heads (int): Number of heads. Default: `16`.
+        num_layers (int): Number of layers. Default: `3`.
+        input_features (int): Number of input features. Default: `768`.
+        input_max_sequence_length (int): Maximum input sequence length. Default: `1024`.
+        input_dimension (int): Input dimension. Default: `2`.
+        conditioning_features (int): Number of conditioning features. Default: `1024`.
+        conditioning_max_sequence_length (int): Maximum conditioning sequence length. Default: `77`.
+        conditioning_dimension (int): Conditioning dimension. Default: `1`.
+        expansion_factor (int): Expansion factor. Default: `4`.
+        prediction_type (str): The type of prediction to use. Must be one of 'epsilon', 'v_prediction'. Default: `epsilon`.
+        T_max (int): Maximum number of timesteps. Default: `1000`.
+        input_key (str): Key for the input to the model. Default: `input`.
+        input_coords_key (str): Key for the input coordinates. Default: `input_coords`.
+        input_mask_key (str): Key for the input mask. Default: `input_mask`.
+        conditioning_key (str): Key for the conditioning. Default: `conditioning`.
+        conditioning_coords_key (str): Key for the conditioning coordinates. Default: `conditioning_coords`.
+        conditioning_mask_key (str): Key for the conditioning mask. Default: `conditioning_mask`.
+    """
+    model = DiffusionTransformer(num_features=num_features,
+                                 num_heads=num_heads,
+                                 num_layers=num_layers,
+                                 input_features=input_features,
+                                 input_max_sequence_length=input_max_sequence_length,
+                                 input_dimension=input_dimension,
+                                 conditioning_features=conditioning_features,
+                                 conditioning_max_sequence_length=conditioning_max_sequence_length,
+                                 conditioning_dimension=conditioning_dimension,
+                                 expansion_factor=expansion_factor)
+
+    composer_model = ComposerDiffusionTransformer(model=model,
+                                                  prediction_type=prediction_type,
+                                                  T_max=T_max,
+                                                  input_key=input_key,
+                                                  input_coords_key=input_coords_key,
+                                                  input_mask_key=input_mask_key,
+                                                  conditioning_key=conditioning_key,
+                                                  conditioning_coords_key=conditioning_coords_key,
+                                                  conditioning_mask_key=conditioning_mask_key)
+    return composer_model
 
 
 def build_autoencoder(input_channels: int = 3,
