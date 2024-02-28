@@ -184,7 +184,6 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
             ``StreamingImageCaptionDataset`` uses either ``streams`` or ``remote``/``local``. Default:``None``.
         remote (str, optional): Remote directory (S3 or local filesystem) where dataset is stored. Default: ``None``.
         local (str, optional): Local filesystem directory where dataset is cached during operation. Default: ``None``.
-        tokenizer_name_or_path (str): The name or path of the tokenizer to use. Default: ``'stabilityai/stable-diffusion-2-base'``.
         caption_drop_prob (float): The probability of dropping a caption. Default: ``0.0``.
         patch_size (int): The size of the patches to extract from the image. Default: ``16``.
         max_patches (int): The maximum number of patches to extract from the image. Images will be resized if there are more
@@ -229,11 +228,6 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
         self.max_timestep = max_timestep
         self.image_key = image_key
         self.caption_key = caption_key
-
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, subfolder='tokenizer')
-        except ValueError:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
 
     def _resize_and_crop_to_patch_size(self, img):
         _, H, W = img.shape
@@ -432,7 +426,6 @@ def build_streaming_patched_image_caption_dataloader(
     remote: Union[str, List],
     local: Union[str, List],
     batch_size: int,
-    tokenizer_name_or_path: str = 'stabilityai/stable-diffusion-2-base',
     caption_drop_prob: float = 0.0,
     patch_size: int = 16,
     max_patches: int = 1024,
@@ -448,7 +441,6 @@ def build_streaming_patched_image_caption_dataloader(
         remote (str, Sequence[str]): One or more remote directories (S3 or local filesystem) where dataset is stored.
         local (str, Sequence[str]): One or more local filesystem directories where dataset is cached during operation.
         batch_size (int): The batch size to use for both the ``StreamingDataset`` and ``DataLoader``.
-        tokenizer_name_or_path (str): The name or path of the tokenizer to use. Default: ``'stabilityai/stable-diffusion-2-base'``.
         caption_drop_prob (float): The probability of dropping a caption. Default: ``0.0``.
         patch_size (int): The size of the patches to extract from the image. Default: ``16``.
         max_patches (int): The maximum number of patches to extract from the image. Images will be resized if there are more
@@ -488,7 +480,6 @@ def build_streaming_patched_image_caption_dataloader(
 
     dataset = StreamingPatchedImageCaptionDataset(
         streams=streams,
-        tokenizer_name_or_path=tokenizer_name_or_path,
         caption_drop_prob=caption_drop_prob,
         patch_size=patch_size,
         max_patches=max_patches,

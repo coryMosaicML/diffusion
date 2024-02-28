@@ -138,7 +138,6 @@ class DiffusionTransformer(nn.Module):
                  conditioning_features: int = 1024,
                  conditioning_max_sequence_length: int = 77,
                  conditioning_dimension: int = 2,
-                 num_timesteps: int = 1000,
                  expansion_factor: int = 4):
         super().__init__()
         # Params for the network architecture
@@ -154,8 +153,6 @@ class DiffusionTransformer(nn.Module):
         self.conditioning_features = conditioning_features
         self.conditioning_dimension = conditioning_dimension
         self.conditioning_max_sequence_length = conditioning_max_sequence_length
-        # Params for timestep embedding
-        self.num_timesteps = num_timesteps
 
         # Projection layer for the input sequence
         self.input_embedding = nn.Linear(self.input_features, self.num_features)
@@ -296,8 +293,8 @@ class ComposerDiffusionTransformer(ComposerModel):
         # Generate the noise, applied to the whole input sequence
         noise = torch.randn(*inputs.shape, device=inputs.device, generator=self.rng_generator)
         # Add the noise to the latents according to the natural schedule
-        cos_t = torch.cos(timesteps * torch.pi / (2 * self.T_max)).view(-1, 1, 1, 1)
-        sin_t = torch.sin(timesteps * torch.pi / (2 * self.T_max)).view(-1, 1, 1, 1)
+        cos_t = torch.cos(timesteps * torch.pi / (2 * self.T_max)).view(-1, 1, 1)
+        sin_t = torch.sin(timesteps * torch.pi / (2 * self.T_max)).view(-1, 1, 1)
         noised_inputs = cos_t * inputs + sin_t * noise
         if self.prediction_type == 'epsilon':
             # Get the (epsilon) targets
@@ -359,8 +356,8 @@ class ComposerDiffusionTransformer(ComposerModel):
     def update_inputs(self, inputs, predictions, t, delta_t):
         """Gets the input update."""
         angle = t * torch.pi / (2 * self.T_max)
-        cos_t = torch.cos(angle).view(-1, 1, 1, 1)
-        sin_t = torch.sin(angle).view(-1, 1, 1, 1)
+        cos_t = torch.cos(angle).view(-1, 1, 1)
+        sin_t = torch.sin(angle).view(-1, 1, 1)
         if self.prediction_type == 'epsilon':
             if angle == torch.pi / 2:
                 # Optimal update here is to do nothing.
