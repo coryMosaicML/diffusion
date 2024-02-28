@@ -8,6 +8,7 @@ import random
 from io import BytesIO
 from typing import Callable, Dict, List, Optional, Sequence, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -204,6 +205,7 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
         caption_drop_prob: float = 0.0,
         patch_size: int = 16,
         max_patches: int = 1024,
+        max_timestep: int = 1000,
         transform: Optional[Callable] = None,
         image_key: str = 'image',
         caption_key: str = 'caption',
@@ -224,6 +226,7 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
         self.caption_drop_prob = caption_drop_prob
         self.patch_size = patch_size
         self.max_patches = max_patches
+        self.max_timestep = max_timestep
         self.image_key = image_key
         self.caption_key = caption_key
 
@@ -262,9 +265,7 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
         patches = img.reshape(C, num_H_patches, self.patch_size, num_W_patches, self.patch_size)
         patches = patches.permute(1, 3, 0, 2, 4).reshape(-1, C * self.patch_size * self.patch_size)
         # Generate coordinates for each patch
-        coords = torch.tensor([
-            (i * self.patch_size, j * self.patch_size) for i in range(num_H_patches) for j in range(num_W_patches)
-        ])
+        coords = torch.tensor([(i, j) for i in range(num_H_patches) for j in range(num_W_patches)])
         # Pad the patches and coords to the maximum number of patches, and make a mask.
         num_patches = patches.shape[0]
         mask = torch.ones(self.max_patches, dtype=torch.int, device=patches.device)
@@ -302,22 +303,16 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
         out['patch_coords'] = coords
         out['patch_mask'] = mask
 
-        # Caption
+        # Caption, assuming precomputed latents
+        caption = torch.from_numpy(np.frombuffer(sample[self.caption_key], dtype=np.float16).copy()).reshape(77, 1024)
+        caption_coords = torch.arange(caption.shape[0], device=caption.device).unsqueeze(-1)  # (seq_len, 1)
+        caption_mask = torch.ones(caption.shape[0], dtype=torch.int, device=caption.device)
         if torch.rand(1) < self.caption_drop_prob:
-            caption = ''
-        else:
-            caption = sample[self.caption_key]
-            if isinstance(caption, List):
-                caption = caption[0]
-        tokenizer_out = self.tokenizer(caption,
-                                       padding='max_length',
-                                       max_length=self.tokenizer.model_max_length,
-                                       truncation=True,
-                                       return_tensors='pt')
-        tokenized_caption = tokenizer_out.input_ids.squeeze()
-        attention_mask = tokenizer_out.attention_mask
-        out['caption'] = tokenized_caption
-        out['caption_mask'] = attention_mask
+            caption *= 0
+            caption_mask *= 0
+        out['caption'] = caption
+        out['caption_coords'] = caption_coords
+        out['caption_mask'] = caption_mask
         return out
 
 
