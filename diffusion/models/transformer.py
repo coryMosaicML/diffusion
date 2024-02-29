@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from composer.models import ComposerModel
 from torchmetrics import MeanSquaredError
+from tqdm.auto import tqdm
 
 
 def modulate(x, shift, scale):
@@ -158,7 +159,7 @@ class DiffusionTransformer(nn.Module):
         self.input_embedding = nn.Linear(self.input_features, self.num_features)
         # Embedding layer for the input sequence
         position_embedding_dims = [self.input_max_sequence_length] * self.input_dimension + [self.num_features]
-        input_position_embedding = torch.randn(*position_embedding_dims)
+        input_position_embedding = torch.randn(*position_embedding_dims) / math.sqrt(self.num_features)
         self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
         # Projection layer for the conditioning sequence
         self.conditioning_embedding = nn.Linear(self.conditioning_features, self.num_features)
@@ -166,7 +167,7 @@ class DiffusionTransformer(nn.Module):
         position_embedding_dims = [self.conditioning_max_sequence_length] * self.conditioning_dimension + [
             self.num_features
         ]
-        conditioning_position_embedding = torch.randn(*position_embedding_dims)
+        conditioning_position_embedding = torch.randn(*position_embedding_dims) / math.sqrt(self.num_features)
         self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
@@ -194,7 +195,7 @@ class DiffusionTransformer(nn.Module):
                 conditioning_coords=None,
                 input_mask=None,
                 conditioning_mask=None):
-        # TODO: Add support for masking, add patch and pack support
+        # TODO: Add support for masking, add patch and pack support, fix embedding norms
         # Embed the timestep
         t = timestep_embedding(t, self.num_features)
 
@@ -221,7 +222,7 @@ class DiffusionTransformer(nn.Module):
         for block in self.transformer_blocks:
             y = block(y, t, mask=None)
         # Throw away the conditioning tokens
-        y = y[:, -x.shape[1]:, :]
+        y = y[:, 0:x.shape[1], :]
         # Pass through the output layers to get the right number of elements
         mods = self.adaLN_mlp(t).unsqueeze(1).chunk(2, dim=2)
         y = modulate(self.final_norm(y), mods[0], mods[1])
@@ -331,7 +332,11 @@ class ComposerDiffusionTransformer(ComposerModel):
     def loss(self, outputs, batch):
         """MSE loss between outputs and targets."""
         losses = {}
-        losses['total'] = F.mse_loss(outputs['predictions'], outputs['targets'])
+        # Need to mask out elements in the loss that are not present in the input
+        mask = batch[self.input_mask_key]  # (B, T1), 1 if included, 0 otherwise.
+        loss = (outputs['predictions'] - outputs['targets'])**2  # (B, T1, C)
+        loss = loss.mean(dim=2)  # (B, T1)
+        losses['total'] = (loss * mask).sum() / mask.sum()
         return losses
 
     def eval_forward(self, batch, outputs=None):
@@ -369,4 +374,56 @@ class ComposerDiffusionTransformer(ComposerModel):
                 inputs = inputs - (predictions - sin_t * inputs) * delta_t / cos_t
         elif self.prediction_type == 'v_prediction':
             inputs = inputs - delta_t * predictions
+        return inputs
+
+    def generate(self,
+                 input_coords: torch.Tensor,
+                 input_mask: torch.Tensor,
+                 conditioning: torch.Tensor,
+                 conditioning_coords: torch.Tensor,
+                 conditioning_mask: torch.Tensor,
+                 guidance_scale: float = 7.0,
+                 num_timesteps: int = 50,
+                 progress_bar: bool = True,
+                 seed: Optional[int] = None):
+        """Generate from the model."""
+        device = next(self.model.parameters()).device
+        # Create rng for the generation
+        rng_generator = torch.Generator(device=device)
+        if seed:
+            rng_generator = rng_generator.manual_seed(seed)
+        # From the input coordinates, generate a noisy input sequence
+        inputs = torch.randn(*input_coords.shape[:-1],
+                             self.model.input_features,
+                             device=device,
+                             generator=rng_generator)
+        # Set up for CFG
+        input_coords = torch.cat([input_coords, input_coords], dim=0)
+        input_mask = torch.cat([input_mask, input_mask], dim=0).to(device)
+        conditioning = torch.cat([torch.zeros_like(conditioning), conditioning], dim=0).to(device)
+        conditioning_coords = torch.cat([conditioning_coords, conditioning_coords], dim=0)
+        conditioning_mask = torch.cat([torch.zeros_like(conditioning_mask), conditioning_mask], dim=0).to(device)
+        # Make the timesteps
+        timesteps = torch.linspace(self.T_max, 0, num_timesteps + 1, device=device)
+        time_deltas = -torch.diff(timesteps) * (torch.pi / (2 * self.T_max))
+        timesteps = timesteps[:-1]
+        # backward diffusion process
+        for i, t in enumerate(tqdm(timesteps, disable=not progress_bar)):
+            # Expand t to the batch size
+            t = t * torch.ones(inputs.shape[0], device=device)
+            # Duplicate the inputs for CFG
+            doubled_inputs = torch.cat([inputs, inputs], dim=0)
+            # Get the model prediction
+            model_out = self.model(doubled_inputs,
+                                   input_coords,
+                                   t,
+                                   conditioning=conditioning,
+                                   conditioning_coords=conditioning_coords,
+                                   input_mask=input_mask,
+                                   conditioning_mask=conditioning_mask)
+            # Do CFG
+            pred_uncond, pred_cond = model_out.chunk(2, dim=0)
+            pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+            # Update the inputs
+            inputs = self.update_inputs(inputs, pred, t, time_deltas[i])
         return inputs

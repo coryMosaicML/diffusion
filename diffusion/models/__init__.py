@@ -7,11 +7,13 @@ from diffusion.models.models import (build_autoencoder, build_diffusers_autoenco
                                      discrete_pixel_diffusion, stable_diffusion_2, stable_diffusion_xl)
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
+from diffusion.models.transformer import ComposerDiffusionTransformer
 
 __all__ = [
     'build_autoencoder',
     'build_diffusers_autoencoder',
     'continuous_pixel_diffusion',
+    'ComposerDiffusionTransformer',
     'discrete_pixel_diffusion',
     'PixelDiffusion',
     'stable_diffusion_2',

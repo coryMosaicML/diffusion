@@ -10,6 +10,9 @@ import torch
 from composer import Callback, Logger, State
 from composer.core import TimeUnit, get_precision_context
 from torch.nn.parallel import DistributedDataParallel
+from transformers import CLIPTextModel, CLIPTokenizer
+
+from diffusion.models import ComposerDiffusionTransformer
 
 
 class LogDiffusionImages(Callback):
@@ -142,3 +145,83 @@ class LogAutoencoderImages(Callback):
                                   name=f'Image (input, reconstruction, latents) {i}',
                                   step=state.timestamp.batch.value,
                                   use_table=self.use_table)
+
+
+class LogTransformerImages(Callback):
+    """Logs images generated from the evaluation prompts to a logger."""
+
+    def __init__(self):
+        self.prompts = ['A photo of a shiba inu wearing a blue sweater']
+        self.height = 256
+        self.width = 256
+        self.patch_size = 16
+        self.guidance_scale = 7.0
+        self.num_timesteps = 50
+        self.seed = 1138
+
+        model_name = 'stabilityai/stable-diffusion-2-base'
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
+        self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
+
+    def _encode_prompt(self, prompt: str):
+        """Encodes a prompt into a conditioning tensor."""
+        tokenizer_out = self.tokenizer(prompt, padding='max_length', truncation=True, return_tensors='pt')
+        input_ids, attention_mask = tokenizer_out['input_ids'], tokenizer_out['attention_mask']
+        text_encoding = self.text_encoder(input_ids, attention_mask=attention_mask)[0]
+        text_coords = torch.arange(text_encoding.shape[0]).unsqueeze(0).unsqueeze(-1)
+        return text_encoding, text_coords, attention_mask
+
+    def _create_input_coords_and_mask(self, height: int, width: int):
+        """Creates input coordinates for the input image."""
+        num_H_patches = height // self.patch_size
+        num_W_patches = width // self.patch_size
+        input_coords = torch.tensor([(i, j) for i in range(num_H_patches) for j in range(num_W_patches)]).unsqueeze(0)
+        input_mask = torch.ones(1, input_coords.shape[1])
+        return input_coords, input_mask
+
+    def _reconstruct_image_from_patches(self, patches, coords):
+        C = patches.shape[1] // (self.patch_size * self.patch_size)
+        # Calculate the height and width of the original image from the coordinates
+        H = coords[:, 0].max() * self.patch_size + self.patch_size
+        W = coords[:, 1].max() * self.patch_size + self.patch_size
+        # Initialize an empty tensor for the reconstructed image
+        img = torch.zeros((C, H, W))
+        # Iterate over the patches and their coordinates
+        for patch, (y, x) in zip(patches, self.patch_size * coords):
+            # Reshape the patch to [C, patch_size, patch_size]
+            patch = patch.view(C, self.patch_size, self.patch_size)
+            # Place the patch in the corresponding location in the image
+            img[:, y:y + self.patch_size, x:x + self.patch_size] = patch
+        # Image is in the range [-1, 1], so shift and clamp it to [0, 1]
+        img = (img / 2 + 0.5).clamp(0, 1)
+        return img
+
+    def eval_start(self, state: State, logger: Logger):
+        # Get the model object if it has been wrapped by DDP to access the image generation function.
+        if isinstance(state.model, DistributedDataParallel):
+            model = state.model.module
+        else:
+            model = state.model
+        assert isinstance(model, ComposerDiffusionTransformer)
+
+        # Generate images
+        gen_images = []
+        with get_precision_context(state.precision):
+            for prompt in self.prompts:
+                input_coords, input_mask = self._create_input_coords_and_mask(self.height, self.width)
+                conditioning, conditioning_coords, conditioning_mask = self._encode_prompt(prompt)
+                gen_patches = model.generate(input_coords=input_coords,
+                                             input_mask=input_mask,
+                                             conditioning=conditioning,
+                                             conditioning_coords=conditioning_coords,
+                                             conditioning_mask=conditioning_mask,
+                                             guidance_scale=self.guidance_scale,
+                                             num_timesteps=self.num_timesteps,
+                                             progress_bar=False,
+                                             seed=self.seed)
+                gen_image = self._reconstruct_image_from_patches(gen_patches[0], input_coords[0])
+                gen_images.append(gen_image)
+
+        # Log images to wandb
+        for prompt, image in zip(self.prompts, gen_images):
+            logger.log_images(images=image, name=prompt, step=state.timestamp.batch.value, use_table=False)
