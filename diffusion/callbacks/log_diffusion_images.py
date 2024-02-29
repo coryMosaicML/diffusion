@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 from composer import Callback, Logger, State
 from composer.core import TimeUnit, get_precision_context
+from diffusers import AutoencoderKL
 from torch.nn.parallel import DistributedDataParallel
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -150,8 +151,11 @@ class LogAutoencoderImages(Callback):
 class LogTransformerImages(Callback):
     """Logs images generated from the evaluation prompts to a logger."""
 
-    def __init__(self):
-        self.prompts = ['A photo of a shiba inu wearing a blue sweater']
+    def __init__(self, latent: bool = False):
+        self.latent = latent
+        self.prompts = [
+            'A photo of a shiba inu wearing a blue sweater', 'A majestic lion jumping from a big stone at night'
+        ]
         self.height = 256
         self.width = 256
         self.patch_size = 16
@@ -161,13 +165,16 @@ class LogTransformerImages(Callback):
 
         model_name = 'stabilityai/stable-diffusion-2-base'
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
-        self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder')
+        self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder').cuda()
+        if self.latent:
+            self.vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae').cuda()
 
     def _encode_prompt(self, prompt: str):
         """Encodes a prompt into a conditioning tensor."""
         tokenizer_out = self.tokenizer(prompt, padding='max_length', truncation=True, return_tensors='pt')
         input_ids, attention_mask = tokenizer_out['input_ids'], tokenizer_out['attention_mask']
-        text_encoding = self.text_encoder(input_ids, attention_mask=attention_mask)[0]
+        device = self.text_encoder.device
+        text_encoding = self.text_encoder(input_ids.to(device), attention_mask=attention_mask.to(device))[0]
         text_coords = torch.arange(text_encoding.shape[0]).unsqueeze(0).unsqueeze(-1)
         return text_encoding, text_coords, attention_mask
 
