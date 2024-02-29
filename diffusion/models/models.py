@@ -442,6 +442,10 @@ def DiT(
                                                   conditioning_key=conditioning_key,
                                                   conditioning_coords_key=conditioning_coords_key,
                                                   conditioning_mask_key=conditioning_mask_key)
+
+    if torch.cuda.is_available():
+        model = DeviceGPU().module_to_device(model)
+
     return composer_model
 
 
