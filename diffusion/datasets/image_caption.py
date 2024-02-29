@@ -234,8 +234,8 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
         # First, resize the image so that the number of patches is less than or equal to the maximum number of patches
         num_patches = (H / self.patch_size) * (W / self.patch_size)
         resize_factor = min(1.0, (self.max_patches / num_patches)**0.5)
-        new_H = round(H * resize_factor)
-        new_W = round(W * resize_factor)
+        new_H = int(H * resize_factor)
+        new_W = int(W * resize_factor)
         resized_img = F.interpolate(img.unsqueeze(0), size=(new_H, new_W), mode='bilinear',
                                     align_corners=False).squeeze(0)
         # Symmetrically trim off the edges of the image so that the dimensions are divisible by the patch size
@@ -284,6 +284,137 @@ class StreamingPatchedImageCaptionDataset(StreamingDataset):
             img = Image.open(BytesIO(sample[self.image_key]))
         if img.mode != 'RGB':
             img = img.convert('RGB')
+        # Image transforms
+        if self.transform is not None:
+            img = self.transform(img)
+        # img needs to be a torch tensor for patchification
+        if not isinstance(img, torch.Tensor):
+            raise ValueError('Image after transformations must be a Torch Tensor')
+        # Patchify the image
+        img = self._resize_and_crop_to_patch_size(img)
+        patches, coords, mask = self._extract_non_overlapping_patches_with_coords(img)
+        out['patches'] = patches
+        out['patch_coords'] = coords
+        out['patch_mask'] = mask
+
+        # Caption, assuming precomputed latents
+        caption = torch.from_numpy(np.frombuffer(sample[self.caption_key], dtype=np.float16).copy()).reshape(77, 1024)
+        caption_coords = torch.arange(caption.shape[0], device=caption.device).unsqueeze(-1)  # (seq_len, 1)
+        caption_mask = torch.ones(caption.shape[0], dtype=torch.int, device=caption.device)
+        if torch.rand(1) < self.caption_drop_prob:
+            caption *= 0
+            caption_mask *= 0
+        out['caption'] = caption
+        out['caption_coords'] = caption_coords
+        out['caption_mask'] = caption_mask
+        return out
+
+
+class StreamingPatchedLatentImageCaptionDataset(StreamingDataset):
+    """Streaming dataset for patched-image-caption pairs.
+
+    Args:
+        streams (Sequence[Stream], optional): One or more Streams to stream/cache samples from.
+            ``StreamingImageCaptionDataset`` uses either ``streams`` or ``remote``/``local``. Default:``None``.
+        remote (str, optional): Remote directory (S3 or local filesystem) where dataset is stored. Default: ``None``.
+        local (str, optional): Local filesystem directory where dataset is cached during operation. Default: ``None``.
+        caption_drop_prob (float): The probability of dropping a caption. Default: ``0.0``.
+        patch_size (int): The size of the patches to extract from the image. Default: ``16``.
+        max_patches (int): The maximum number of patches to extract from the image. Images will be resized if there are more
+            patches than this present. Default: ``1024``.
+        transform (Callable, optional): The transforms to apply to the image. Default: ``None``.
+        image_key (str): Key associated with the image in the streaming dataset. Default: ``'image'``.
+        caption_key (str): Key associated with the caption in the streaming dataset. Default: ``'caption'``.
+
+        **streaming_kwargs: Additional arguments to pass in the construction of the StreamingDataloader
+    """
+
+    def __init__(
+        self,
+        streams: Optional[Sequence[Stream]] = None,
+        remote: Optional[str] = None,
+        local: Optional[str] = None,
+        tokenizer_name_or_path: str = 'stabilityai/stable-diffusion-2-base',
+        caption_drop_prob: float = 0.0,
+        patch_size: int = 16,
+        max_patches: int = 1024,
+        max_timestep: int = 1000,
+        transform: Optional[Callable] = None,
+        image_key: str = 'image',
+        caption_key: str = 'caption',
+        **streaming_kwargs,
+    ) -> None:
+
+        # Set defaults for vision-friendly streaming args.
+        streaming_kwargs.setdefault('shuffle_block_size', 1 << 18)
+        streaming_kwargs.setdefault('shuffle_algo', 'py1s')
+
+        super().__init__(
+            streams=streams,
+            remote=remote,
+            local=local,
+            **streaming_kwargs,
+        )
+        self.transform = transform
+        self.caption_drop_prob = caption_drop_prob
+        self.patch_size = patch_size
+        self.max_patches = max_patches
+        self.max_timestep = max_timestep
+        self.image_key = image_key
+        self.caption_key = caption_key
+
+    def _resize_and_crop_to_patch_size(self, img):
+        _, H, W = img.shape
+        # First, resize the image so that the number of patches is less than or equal to the maximum number of patches
+        num_patches = (H / self.patch_size) * (W / self.patch_size)
+        resize_factor = min(1.0, (self.max_patches / num_patches)**0.5)
+        new_H = int(H * resize_factor)
+        new_W = int(W * resize_factor)
+        resized_img = F.interpolate(img.unsqueeze(0), size=(new_H, new_W), mode='bilinear',
+                                    align_corners=False).squeeze(0)
+        # Symmetrically trim off the edges of the image so that the dimensions are divisible by the patch size
+        extra_H_pixels = new_H % self.patch_size
+        extra_W_pixels = new_W % self.patch_size
+        trim_top = extra_H_pixels // 2
+        trim_bottom = extra_H_pixels - trim_top
+        trim_left = extra_W_pixels // 2
+        trim_right = extra_W_pixels - trim_left
+        cropped_img = resized_img[:, trim_top:new_H - trim_bottom, trim_left:new_W - trim_right]
+        assert cropped_img.shape[1] % self.patch_size == 0 and cropped_img.shape[2] % self.patch_size == 0
+        return cropped_img
+
+    def _extract_non_overlapping_patches_with_coords(self, img):
+        # Assume img is a tensor of shape [C, H, W]
+        C, H, W = img.shape
+        assert H % self.patch_size == 0 and W % self.patch_size == 0, 'Image dimensions must be divisible by patch_size'
+        # Reshape and permute to get non-overlapping patches
+        num_H_patches = H // self.patch_size
+        num_W_patches = W // self.patch_size
+        patches = img.reshape(C, num_H_patches, self.patch_size, num_W_patches, self.patch_size)
+        patches = patches.permute(1, 3, 0, 2, 4).reshape(-1, C * self.patch_size * self.patch_size)
+        # Generate coordinates for each patch
+        coords = torch.tensor([(i, j) for i in range(num_H_patches) for j in range(num_W_patches)])
+        # Pad the patches and coords to the maximum number of patches, and make a mask.
+        num_patches = patches.shape[0]
+        mask = torch.ones(self.max_patches, dtype=torch.int, device=patches.device)
+        mask[num_patches:] = 0
+        if num_patches < self.max_patches:
+            patch_padding = torch.zeros(self.max_patches - num_patches,
+                                        C * self.patch_size * self.patch_size,
+                                        dtype=patches.dtype,
+                                        device=patches.device)
+            patches = torch.cat([patches, patch_padding], dim=0)
+            coord_padding = torch.zeros(self.max_patches - num_patches, 2, dtype=coords.dtype, device=coords.device)
+            coords = torch.cat([coords, coord_padding], dim=0)
+        return patches, coords, mask
+
+    def __getitem__(self, index):
+        sample = super().__getitem__(index)
+        out = {}
+
+        # Image
+        img = torch.from_numpy(np.frombuffer(sample[self.image_key], dtype=np.float16).copy()).reshape(4, 32,
+                                                                                                       32).float()
         # Image transforms
         if self.transform is not None:
             img = self.transform(img)
@@ -479,6 +610,84 @@ def build_streaming_patched_image_caption_dataloader(
     assert isinstance(transform, Callable)
 
     dataset = StreamingPatchedImageCaptionDataset(
+        streams=streams,
+        caption_drop_prob=caption_drop_prob,
+        patch_size=patch_size,
+        max_patches=max_patches,
+        transform=transform,
+        image_key=image_key,
+        caption_key=caption_key,
+        batch_size=batch_size,
+        **streaming_kwargs,
+    )
+
+    dataloader = DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        sampler=None,
+        **dataloader_kwargs,
+    )
+
+    return dataloader
+
+
+def build_streaming_patched_latent_image_caption_dataloader(
+    remote: Union[str, List],
+    local: Union[str, List],
+    batch_size: int,
+    caption_drop_prob: float = 0.0,
+    patch_size: int = 2,
+    max_patches: int = 256,
+    transform: Optional[List[Callable]] = None,
+    image_key: str = 'image',
+    caption_key: str = 'caption',
+    streaming_kwargs: Optional[Dict] = None,
+    dataloader_kwargs: Optional[Dict] = None,
+):
+    """Builds a streaming LAION dataloader.
+
+    Args:
+        remote (str, Sequence[str]): One or more remote directories (S3 or local filesystem) where dataset is stored.
+        local (str, Sequence[str]): One or more local filesystem directories where dataset is cached during operation.
+        batch_size (int): The batch size to use for both the ``StreamingDataset`` and ``DataLoader``.
+        caption_drop_prob (float): The probability of dropping a caption. Default: ``0.0``.
+        patch_size (int): The size of the patches to extract from the image. Default: ``16``.
+        max_patches (int): The maximum number of patches to extract from the image. Images will be resized if there are more
+            patches than this present. Default: ``1024``.
+        transform (Optional[Callable]): The transforms to apply to the image. Default: ``None``.
+        image_key (str): Key associated with the image in the streaming dataset. Default: ``'image'``.
+        caption_key (str): Key associated with the caption in the streaming dataset. Default: ``'caption'``.
+        streaming_kwargs (dict, optional): Additional arguments to pass to the ``StreamingDataset``. Default: ``None``.
+        dataloader_kwargs (dict, optional): Additional arguments to pass to the ``DataLoader``. Default: ``None``.
+    """
+    # Handle ``None`` kwargs
+    if streaming_kwargs is None:
+        streaming_kwargs = {}
+    if dataloader_kwargs is None:
+        dataloader_kwargs = {}
+
+    # Check types for remote and local
+    if isinstance(remote, str) and isinstance(local, str):
+        # Hacky... make remote and local lists to simplify downstream code
+        remote, local = [remote], [local]
+    elif isinstance(remote, Sequence) and isinstance(local, Sequence):
+        if len(remote) != len(local):
+            ValueError(
+                f'remote and local Sequences must be the same length, got lengths {len(remote)} and {len(local)}')
+    else:
+        ValueError(f'remote and local must be both Strings or Sequences, got types {type(remote)} and {type(local)}.')
+
+    # Create a Stream for each (remote, local) pair
+    streams = []
+    for r, l in zip(remote, local):
+        streams.append(Stream(remote=r, local=l))
+
+    if transform is None:
+        transform = [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    transform = transforms.Compose(transform)
+    assert isinstance(transform, Callable)
+
+    dataset = StreamingPatchedLatentImageCaptionDataset(
         streams=streams,
         caption_drop_prob=caption_drop_prob,
         patch_size=patch_size,
