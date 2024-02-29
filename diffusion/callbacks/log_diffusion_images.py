@@ -165,9 +165,9 @@ class LogTransformerImages(Callback):
 
         model_name = 'stabilityai/stable-diffusion-2-base'
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
-        self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder').cuda()
+        self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder').cpu()
         if self.latent:
-            self.vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae').cuda()
+            self.vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae').cpu()
 
     def _encode_prompt(self, prompt: str):
         """Encodes a prompt into a conditioning tensor."""
@@ -211,6 +211,8 @@ class LogTransformerImages(Callback):
             model = state.model
         assert isinstance(model, ComposerDiffusionTransformer)
 
+        # Move text encoder to device
+        self.text_encoder = self.text_encoder.cuda()
         # Generate images
         gen_images = []
         with get_precision_context(state.precision):
@@ -228,6 +230,8 @@ class LogTransformerImages(Callback):
                                              seed=self.seed)
                 gen_image = self._reconstruct_image_from_patches(gen_patches[0], input_coords[0])
                 gen_images.append(gen_image)
+        # Move text encoder back off device
+        self.text_encoder = self.text_encoder.cpu()
 
         # Log images to wandb
         for prompt, image in zip(self.prompts, gen_images):
