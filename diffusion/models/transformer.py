@@ -158,16 +158,15 @@ class DiffusionTransformer(nn.Module):
         # Projection layer for the input sequence
         self.input_embedding = nn.Linear(self.input_features, self.num_features)
         # Embedding layer for the input sequence
-        position_embedding_dims = [self.input_max_sequence_length] * self.input_dimension + [self.num_features]
-        input_position_embedding = torch.randn(*position_embedding_dims) / math.sqrt(self.num_features)
+        input_position_embedding = torch.randn(self.input_dimension, self.input_max_sequence_length, self.num_features)
+        input_position_embedding /= math.sqrt(self.num_features)
         self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
         # Projection layer for the conditioning sequence
         self.conditioning_embedding = nn.Linear(self.conditioning_features, self.num_features)
         # Embedding layer for the conditioning sequence
-        position_embedding_dims = [self.conditioning_max_sequence_length] * self.conditioning_dimension + [
-            self.num_features
-        ]
-        conditioning_position_embedding = torch.randn(*position_embedding_dims) / math.sqrt(self.num_features)
+        conditioning_position_embedding = torch.randn(self.conditioning_dimension,
+                                                      self.conditioning_max_sequence_length, self.num_features)
+        conditioning_position_embedding /= math.sqrt(self.num_features)
         self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
@@ -202,8 +201,11 @@ class DiffusionTransformer(nn.Module):
         # Embed the input
         y = self.input_embedding(x)  # (B, T1, C)
         # Get the input position embeddings and add them to the input
-        position_embedding_ids = [input_coords[:, :, i] for i in range(self.input_dimension)] + [slice(None)]
-        y_position_embeddings = self.input_position_embedding[position_embedding_ids]  # (B, T1, C)
+        input_grid = torch.arange(self.input_dimension).view(1, 1, self.input_dimension).expand(
+            y.shape[0], y.shape[1], self.input_dimension)
+        y_position_embeddings = self.input_position_embedding[input_grid,
+                                                              input_coords, :]  # (B, T1, input_dimension, C)
+        y_position_embeddings = y_position_embeddings.sum(dim=2)  # (B, T1, C)
         y = y + y_position_embeddings  # (B, T1, C)
         if input_mask is None:
             mask = torch.ones(x.shape[0], x.shape[1], device=x.device)
@@ -215,9 +217,11 @@ class DiffusionTransformer(nn.Module):
             # Embed the conditioning
             c = self.conditioning_embedding(conditioning)  # (B, T2, C)
             # Get the conditioning position embeddings and add them to the conditioning
-            position_embedding_ids = [conditioning_coords[:, :, i] for i in range(self.conditioning_dimension)
-                                     ] + [slice(None)]
-            c_position_embeddings = self.conditioning_position_embedding[position_embedding_ids]  # (B, T2, C)
+            c_grid = torch.arange(self.conditioning_dimension).view(1, 1, self.conditioning_dimension).expand(
+                c.shape[0], c.shape[1], self.conditioning_dimension)
+            c_position_embeddings = self.conditioning_position_embedding[
+                c_grid, conditioning_coords, :]  # (B, T2, conditioning_dimension, C)
+            c_position_embeddings = c_position_embeddings.sum(dim=2)  # (B, T2, C)
             c = c + c_position_embeddings  # (B, T2, C)
             # Concatenate the input and conditioning sequences
             y = torch.cat([y, c], dim=1)  # (B, T1 + T2, C)
