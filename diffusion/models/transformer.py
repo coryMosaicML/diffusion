@@ -307,6 +307,21 @@ class ComposerDiffusionTransformer(ComposerModel):
         """Sets the rng generator for the model."""
         self.rng_generator = rng_generator
 
+    def flops_per_batch(self, batch):
+        batch_size, input_seq_len = batch[self.input_key].shape[:2]
+        cond_seq_len = batch[self.conditioning_key].shape[2]
+        seq_len = input_seq_len + cond_seq_len
+        # Calulate flops for non-attention layers
+        linear_flops = (2 * self.model.expansion_factor + 6) * self.model.num_features**2 * self.model.num_layers
+        linear_flops += (2 * self.model.input_features + self.model.conditioning_features +
+                         2 * self.model.num_features) * self.model.num_features
+        linear_flops *= seq_len * batch_size
+        # Calculate flops for attention layers
+        attention_flops = 4 * self.model.num_features**2 * self.model.num_layers * seq_len * batch_size
+        attention_flops += seq_len**2 * self.model.num_features * batch_size
+        attention_flops += seq_len * self.model.num_features * batch_size
+        return 6 * linear_flops + 6 * attention_flops
+
     def diffusion_forward_process(self, inputs: torch.Tensor):
         """Diffusion forward process."""
         # Sample a timestep for every element in the batch
