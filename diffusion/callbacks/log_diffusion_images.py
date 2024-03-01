@@ -151,23 +151,29 @@ class LogAutoencoderImages(Callback):
 class LogTransformerImages(Callback):
     """Logs images generated from the evaluation prompts to a logger."""
 
-    def __init__(self, latent: bool = False):
+    def __init__(self,
+                 prompts: list,
+                 latent: bool = False,
+                 height: int = 256,
+                 width: int = 256,
+                 patch_size: int = 16,
+                 guidance_scale: float = 7.0,
+                 num_timesteps: int = 50,
+                 seed: int = 1138):
         self.latent = latent
-        self.prompts = [
-            'A photo of a shiba inu wearing a blue sweater', 'A majestic lion jumping from a big stone at night'
-        ]
-        self.height = 256
-        self.width = 256
-        self.patch_size = 16
-        self.guidance_scale = 7.0
-        self.num_timesteps = 50
-        self.seed = 1138
+        self.prompts = prompts
+        self.height = height
+        self.width = width
+        self.patch_size = patch_size
+        self.guidance_scale = guidance_scale
+        self.num_timesteps = num_timesteps
+        self.seed = seed
 
         model_name = 'stabilityai/stable-diffusion-2-base'
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder='tokenizer')
         self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder='text_encoder').cpu()
         if self.latent:
-            self.vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae').cpu()
+            self.vae = AutoencoderKL.from_pretrained(model_name, subfolder='vae', torch_dtype=torch.float16).cpu()
 
     def _encode_prompt(self, prompt: str):
         """Encodes a prompt into a conditioning tensor."""
@@ -199,6 +205,13 @@ class LogTransformerImages(Callback):
             patch = patch.view(C, self.patch_size, self.patch_size)
             # Place the patch in the corresponding location in the image
             img[:, y:y + self.patch_size, x:x + self.patch_size] = patch
+        return img
+
+    def _reconstruct_image_from_latents(self, img):
+        img = img / 0.18215
+        # Decode the latents
+        with torch.no_grad():
+            img = self.vae.decode(img.half().cuda()).sample
         # Image is in the range [-1, 1], so shift and clamp it to [0, 1]
         img = (img / 2 + 0.5).clamp(0, 1)
         return img
@@ -213,6 +226,8 @@ class LogTransformerImages(Callback):
 
         # Move text encoder to device
         self.text_encoder = self.text_encoder.cuda()
+        if self.latent:
+            self.vae = self.vae.cuda()
         # Generate images
         gen_images = []
         with get_precision_context(state.precision):
@@ -229,6 +244,12 @@ class LogTransformerImages(Callback):
                                              progress_bar=False,
                                              seed=self.seed)
                 gen_image = self._reconstruct_image_from_patches(gen_patches[0], input_coords[0])
+                if self.latent:
+                    # Decode image with the VAE
+                    gen_image = self._reconstruct_image_from_latents(gen_image.unsqueeze(0))[0]
+                else:
+                    # Image is in the range [-1, 1], so shift and clamp it to [0, 1]
+                    gen_image = (gen_image / 2 + 0.5).clamp(0, 1)
                 gen_images.append(gen_image)
         # Move text encoder back off device
         self.text_encoder = self.text_encoder.cpu()
