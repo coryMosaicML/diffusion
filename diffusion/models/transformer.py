@@ -195,7 +195,7 @@ class DiffusionTransformer(nn.Module):
                 conditioning_coords=None,
                 input_mask=None,
                 conditioning_mask=None):
-        # TODO: Add support for masking, add patch and pack support, fix embedding norms
+        # TODO: Fix embeddings, fix embedding norms
         # Embed the timestep
         t = timestep_embedding(t, self.num_features)
 
@@ -205,6 +205,10 @@ class DiffusionTransformer(nn.Module):
         position_embedding_ids = [input_coords[:, :, i] for i in range(self.input_dimension)] + [slice(None)]
         y_position_embeddings = self.input_position_embedding[position_embedding_ids]  # (B, T1, C)
         y = y + y_position_embeddings  # (B, T1, C)
+        if input_mask is None:
+            mask = torch.ones(x.shape[0], x.shape[1], device=x.device)
+        else:
+            mask = input_mask
 
         if conditioning is not None:
             assert conditioning_coords is not None
@@ -217,10 +221,22 @@ class DiffusionTransformer(nn.Module):
             c = c + c_position_embeddings  # (B, T2, C)
             # Concatenate the input and conditioning sequences
             y = torch.cat([y, c], dim=1)  # (B, T1 + T2, C)
+            # Concatenate the masks
+            if conditioning_mask is None:
+                conditioning_mask = torch.ones(conditioning.shape[0], conditioning.shape[1], device=conditioning.device)
+            mask = torch.cat([mask, conditioning_mask], dim=1)  # (B, T1 + T2)
+
+        # Expand the mask to the right shape
+        mask = mask.bool()
+        mask = mask.unsqueeze(-1) & mask.unsqueeze(1)  # (B, T1 + T2, T1 + T2)
+        identity = torch.eye(mask.shape[1], device=mask.device,
+                             dtype=mask.dtype).unsqueeze(0).expand(mask.shape[0], -1, -1)
+        mask = mask | identity
+        mask = mask.unsqueeze(1)  # (B, 1, T1 + T2, T1 + T2)
 
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
-            y = block(y, t, mask=None)
+            y = block(y, t, mask=mask)
         # Throw away the conditioning tokens
         y = y[:, 0:x.shape[1], :]
         # Pass through the output layers to get the right number of elements
