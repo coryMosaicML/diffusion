@@ -297,9 +297,9 @@ class ComposerDiffusionTransformer(ComposerModel):
         self.conditioning_mask_key = conditioning_mask_key
 
         # Params for MFU computation, subtract off the embedding params
-        self.n_params = sum(p.numel() for p in self.parameters())
-        self.n_params -= self.model.input_position_embedding.numel() + self.model.conditioning_position_embedding.numel(
-        )
+        self.n_params = sum(p.numel() for p in self.model.parameters())
+        self.n_params -= self.model.input_position_embedding.numel()
+        self.n_params -= self.model.conditioning_position_embedding.numel()
 
         # Set up metrics
         self.train_metrics = [MeanSquaredError()]
@@ -313,8 +313,8 @@ class ComposerDiffusionTransformer(ComposerModel):
         self.rng_generator = rng_generator
 
     def flops_per_batch(self, batch):
-        batch_size, input_seq_len = batch[self.input_key].shape[:2]
-        cond_seq_len = batch[self.conditioning_key].shape[2]
+        batch_size, input_seq_len = batch[self.input_key].shape[0:2]
+        cond_seq_len = batch[self.conditioning_key].shape[1]
         seq_len = input_seq_len + cond_seq_len
         # Calulate forward flops excluding attention
         param_flops = 2 * self.n_params * batch_size * seq_len
