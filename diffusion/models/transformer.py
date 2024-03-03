@@ -296,6 +296,11 @@ class ComposerDiffusionTransformer(ComposerModel):
         self.conditioning_coords_key = conditioning_coords_key
         self.conditioning_mask_key = conditioning_mask_key
 
+        # Params for MFU computation, subtract off the embedding params
+        self.n_params = sum(p.numel() for p in self.parameters())
+        self.n_params -= self.model.input_position_embedding.numel() + self.model.conditioning_position_embedding.numel(
+        )
+
         # Set up metrics
         self.train_metrics = [MeanSquaredError()]
         self.val_metrics = [MeanSquaredError()]
@@ -311,16 +316,11 @@ class ComposerDiffusionTransformer(ComposerModel):
         batch_size, input_seq_len = batch[self.input_key].shape[:2]
         cond_seq_len = batch[self.conditioning_key].shape[2]
         seq_len = input_seq_len + cond_seq_len
-        # Calulate flops for non-attention layers
-        linear_flops = (2 * self.model.expansion_factor + 6) * self.model.num_features**2 * self.model.num_layers
-        linear_flops += (2 * self.model.input_features + self.model.conditioning_features +
-                         2 * self.model.num_features) * self.model.num_features
-        linear_flops *= seq_len * batch_size
+        # Calulate forward flops excluding attention
+        param_flops = 2 * self.n_params * batch_size * seq_len
         # Calculate flops for attention layers
-        attention_flops = 4 * self.model.num_features**2 * self.model.num_layers * seq_len * batch_size
-        attention_flops += seq_len**2 * self.model.num_features * batch_size
-        attention_flops += seq_len * self.model.num_features * batch_size
-        return 6 * linear_flops + 6 * attention_flops
+        attention_flops = 4 * self.model.num_layers * seq_len**2 * self.model.num_features * batch_size
+        return 3 * param_flops + 3 * attention_flops
 
     def diffusion_forward_process(self, inputs: torch.Tensor):
         """Diffusion forward process."""
