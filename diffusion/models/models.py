@@ -440,6 +440,28 @@ def latent_diffusion(
     # Last conv block out projection
     unet.conv_out = zero_module(unet.conv_out)
 
+    # Set the FSDP wrap for the unet
+    if hasattr(unet.mid_block, 'attentions'):
+        for attention in unet.mid_block.attentions:
+            attention._fsdp_wrap = True
+    if hasattr(unet.mid_block, 'resnets'):
+        for resnet in unet.mid_block.resnets:
+            resnet._fsdp_wrap = True
+    for block in unet.up_blocks:
+        if hasattr(block, 'attentions'):
+            for attention in block.attentions:
+                attention._fsdp_wrap = True
+        if hasattr(block, 'resnets'):
+            for resnet in block.resnets:
+                resnet._fsdp_wrap = True
+    for block in unet.down_blocks:
+        if hasattr(block, 'attentions'):
+            for attention in block.attentions:
+                attention._fsdp_wrap = True
+        if hasattr(block, 'resnets'):
+            for resnet in block.resnets:
+                resnet._fsdp_wrap = True
+
     # Make the model
     model = LatentDiffusion(model=unet,
                             autoencoder=autoencoder,
