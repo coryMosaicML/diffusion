@@ -14,6 +14,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, PretrainedConfig
 
 from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, ComposerAutoEncoder,
                                           ComposerDiffusersAutoEncoder, load_autoencoder)
+from diffusion.models.edm_diffusion import EDMDiffusion
 from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttnProcessor, zero_module
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
@@ -454,6 +455,191 @@ def stable_diffusion_xl(
         mask_pad_tokens=mask_pad_tokens,
         fsdp=fsdp,
         sdxl=True,
+    )
+    if torch.cuda.is_available():
+        model = DeviceGPU().module_to_device(model)
+        if is_xformers_installed and use_xformers:
+            model.unet.enable_xformers_memory_efficient_attention()
+            if hasattr(model.vae, 'enable_xformers_memory_efficient_attention'):
+                model.vae.enable_xformers_memory_efficient_attention()
+
+    if clip_qkv is not None:
+        if is_xformers_installed and use_xformers:
+            attn_processor = ClippedXFormersAttnProcessor(clip_val=clip_qkv)
+        else:
+            attn_processor = ClippedAttnProcessor2_0(clip_val=clip_qkv)
+        log.info('Using %s with clip_val %.1f' % (attn_processor.__class__, clip_qkv))
+        model.unet.set_attn_processor(attn_processor)
+
+    return model
+
+
+def edm_diffusion(
+    tokenizer_names: Union[str, Tuple[str, ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/tokenizer',
+                                                    'stabilityai/stable-diffusion-xl-base-1.0/tokenizer_2'),
+    text_encoder_names: Union[str, Tuple[str, ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/text_encoder',
+                                                       'stabilityai/stable-diffusion-xl-base-1.0/text_encoder_2'),
+    unet_model_name: str = 'stabilityai/stable-diffusion-xl-base-1.0',
+    vae_model_name: str = 'madebyollin/sdxl-vae-fp16-fix',
+    pretrained: bool = True,
+    autoencoder_path: Optional[str] = None,
+    autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
+    latent_mean: Union[float, Tuple, str] = 0.0,
+    latent_std: Union[float, Tuple, str] = 7.67754318618,
+    train_metrics: Optional[List] = None,
+    val_metrics: Optional[List] = None,
+    val_seed: int = 1138,
+    mask_pad_tokens: bool = False,
+    clip_qkv: Optional[float] = None,
+    use_xformers: bool = True,
+):
+    """EDM training with SDXL UNet and VAE.
+
+    Requires batches of matched images and text prompts to train. Generates images from text
+    prompts. Currently uses UNet and VAE config from SDXL, but text encoder/tokenizer from SD2.
+
+    Args:
+        tokenizer_names (str, Tuple[str, ...]): HuggingFace name(s) of the tokenizer(s) to load.
+            Default: ``('stabilityai/stable-diffusion-xl-base-1.0/tokenizer',
+            'stabilityai/stable-diffusion-xl-base-1.0/tokenizer_2')``.
+        text_encoder_names (str, Tuple[str, ...]): HuggingFace name(s) of the text encoder(s) to load.
+            Default: ``('stabilityai/stable-diffusion-xl-base-1.0/text_encoder',
+            'stabilityai/stable-diffusion-xl-base-1.0/text_encoder_2')``.
+        unet_model_name (str): Name of the UNet model to load. Defaults to
+            'stabilityai/stable-diffusion-xl-base-1.0'.
+        vae_model_name (str): Name of the VAE model to load. Defaults to
+            'madebyollin/sdxl-vae-fp16-fix' as the official VAE checkpoint (from
+            'stabilityai/stable-diffusion-xl-base-1.0') is not compatible with fp16.
+        pretrained (bool): Whether to load pretrained weights. Defaults to True.
+        autoencoder_path (optional, str): Path to autoencoder weights if using custom autoencoder. If not specified,
+            will use the vae from `model_name`. Default `None`.
+        autoencoder_local_path (optional, str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
+        latent_mean (float, Tuple, str): The mean of the autoencoder latents. Either a float for a single value,
+            a tuple of means, or or `'latent_statistics'` to try to use the value from the autoencoder
+            checkpoint. Defaults to `0.0`.
+        latent_std (float, Tuple, str): The std. dev. of the autoencoder latents. Either a float for a single value,
+            a tuple of std_devs, or or `'latent_statistics'` to try to use the value from the autoencoder
+            checkpoint. Defaults to `1/0.13025`.
+        train_metrics (list, optional): List of metrics to compute during training. If None, defaults to
+            [MeanSquaredError()].
+        val_metrics (list, optional): List of metrics to compute during validation. If None, defaults to
+            [MeanSquaredError()].
+        val_seed (int): Seed to use for generating evaluation images. Defaults to 1138.
+        mask_pad_tokens (bool): Whether to mask pad tokens in cross attention. Defaults to False.
+        clip_qkv (float, optional): If not None, clip the qkv values to this value. Improves stability of training.
+            Default: ``None``.
+        use_xformers (bool): Whether to use xformers for attention. Defaults to True.
+    """
+    latent_mean, latent_std = _parse_latent_statistics(latent_mean), _parse_latent_statistics(latent_std)
+
+    if (isinstance(tokenizer_names, tuple) or
+            isinstance(text_encoder_names, tuple)) and len(tokenizer_names) != len(text_encoder_names):
+        raise ValueError('Number of tokenizer_names and text_encoder_names must be equal')
+
+    if train_metrics is None:
+        train_metrics = [MeanSquaredError()]
+    if val_metrics is None:
+        val_metrics = [MeanSquaredError()]
+
+    # Make the tokenizer and text encoder
+    tokenizer = MultiTokenizer(tokenizer_names_or_paths=tokenizer_names)
+    text_encoder = MultiTextEncoder(model_names=text_encoder_names,
+                                    encode_latents_in_fp16=True,
+                                    pretrained_sdxl=pretrained)
+
+    precision = torch.float16
+    # Make the autoencoder
+    if autoencoder_path is None:
+        if latent_mean == 'latent_statistics' or latent_std == 'latent_statistics':
+            raise ValueError('Cannot use tracked latent_statistics when using the pretrained vae.')
+        downsample_factor = 8
+        # Use the pretrained vae
+        try:
+            vae = AutoencoderKL.from_pretrained(vae_model_name, subfolder='vae', torch_dtype=precision)
+        except:  # for handling SDXL vae fp16 fixed checkpoint
+            vae = AutoencoderKL.from_pretrained(vae_model_name, torch_dtype=precision)
+    else:
+        # Use a custom autoencoder
+        vae, latent_statistics = load_autoencoder(autoencoder_path, autoencoder_local_path, torch_dtype=precision)
+        if latent_statistics is None and (latent_mean == 'latent_statistics' or latent_std == 'latent_statistics'):
+            raise ValueError(
+                'Must specify latent scale when using a custom autoencoder without tracking latent statistics.')
+        if isinstance(latent_mean, str) and latent_mean == 'latent_statistics':
+            assert isinstance(latent_statistics, dict)
+            latent_mean = tuple(latent_statistics['latent_channel_means'])
+        if isinstance(latent_std, str) and latent_std == 'latent_statistics':
+            assert isinstance(latent_statistics, dict)
+            latent_std = tuple(latent_statistics['latent_channel_stds'])
+        downsample_factor = 2**(len(vae.config['channel_multipliers']) - 1)
+
+    # Make the unet
+    unet_config = PretrainedConfig.get_config_dict(unet_model_name, subfolder='unet')[0]
+    if pretrained:
+        unet = UNet2DConditionModel.from_pretrained(unet_model_name, subfolder='unet')
+        if isinstance(vae, AutoEncoder) and vae.config['latent_channels'] != 4:
+            raise ValueError(f'Pretrained unet has 4 latent channels but the vae has {vae.latent_channels}.')
+    else:
+        if isinstance(vae, AutoEncoder):
+            # Adapt the unet config to account for differing number of latent channels if necessary
+            unet_config['in_channels'] = vae.config['latent_channels']
+            unet_config['out_channels'] = vae.config['latent_channels']
+        unet_config['cross_attention_dim'] = text_encoder.text_encoder_dim
+        # This config variable is the sum of the text encoder projection dimension and
+        # the number of additional time embeddings (6) * addition_time_embed_dim (256)
+        unet_config['projection_class_embeddings_input_dim'] = text_encoder.text_encoder_proj_dim + 1536
+        # Init the unet from the config
+        unet = UNet2DConditionModel(**unet_config)
+
+        # Zero initialization trick
+        for name, layer in unet.named_modules():
+            # Final conv in ResNet blocks
+            if name.endswith('conv2'):
+                layer = zero_module(layer)
+            # proj_out in attention blocks
+            if name.endswith('to_out.0'):
+                layer = zero_module(layer)
+        # Last conv block out projection
+        unet.conv_out = zero_module(unet.conv_out)
+    if isinstance(latent_mean, float):
+        latent_mean = (latent_mean,) * unet_config['in_channels']
+    if isinstance(latent_std, float):
+        latent_std = (latent_std,) * unet_config['in_channels']
+    assert isinstance(latent_mean, tuple) and isinstance(latent_std, tuple)
+
+    assert isinstance(unet, UNet2DConditionModel)
+    if hasattr(unet, 'mid_block') and unet.mid_block is not None:
+        for attention in unet.mid_block.attentions:
+            attention._fsdp_wrap = True
+        for resnet in unet.mid_block.resnets:
+            resnet._fsdp_wrap = True
+    for block in unet.up_blocks:
+        if hasattr(block, 'attentions'):
+            for attention in block.attentions:
+                attention._fsdp_wrap = True
+        if hasattr(block, 'resnets'):
+            for resnet in block.resnets:
+                resnet._fsdp_wrap = True
+    for block in unet.down_blocks:
+        if hasattr(block, 'attentions'):
+            for attention in block.attentions:
+                attention._fsdp_wrap = True
+        if hasattr(block, 'resnets'):
+            for resnet in block.resnets:
+                resnet._fsdp_wrap = True
+
+    # Make the composer model
+    model = EDMDiffusion(
+        unet=unet,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        latent_mean=latent_mean,
+        latent_std=latent_std,
+        downsample_factor=downsample_factor,
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        val_seed=val_seed,
+        mask_pad_tokens=mask_pad_tokens,
     )
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
