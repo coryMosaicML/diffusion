@@ -346,8 +346,9 @@ class EDMDiffusion(ComposerModel):
         added_cond_kwargs = {'text_embeds': pooled_embeddings, 'time_ids': add_time_ids}
 
         # backward diffusion process
-
         timesteps = self.make_sampling_timesteps(num_inference_steps)
+        # For EDM, latents need to be scaled up by the noise level
+        latents = latents * timesteps[0]
         for i, t in enumerate(timesteps):
             if do_classifier_free_guidance:
                 latent_model_input = torch.cat([latents] * 2)
@@ -358,7 +359,7 @@ class EDMDiffusion(ComposerModel):
             sigma = (t * torch.ones(latents.shape[0], device=device)).view(-1, 1, 1, 1)
             # Compute the EDM scaling factors
             c_noise = log_sigma / 4
-            c_in = (1 / torch.sqrt(self.sigma_data**2 + sigma**2))
+            c_in = 1 / torch.sqrt(self.sigma_data**2 + sigma**2)
             if do_classifier_free_guidance:
                 c_in = torch.cat([c_in] * 2)
             c_skip = (self.sigma_data**2 / (self.sigma_data**2 + sigma**2))
