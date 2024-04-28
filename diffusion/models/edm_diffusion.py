@@ -390,7 +390,7 @@ class EDMDiffusion(ComposerModel):
                 delta_t = timesteps[i] - timesteps[(i + 1)]
             else:
                 delta_t = timesteps[i]
-            latents = latents + noise * delta_t
+            latents = latents - noise * delta_t
 
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
