@@ -111,21 +111,20 @@ class EDMDiffusion(ComposerModel):
         """Perform forward diffusion according to the edm framework."""
         # First, sample noise levels according to a log-normal distribution
         log_sigma = 1.2 * (torch.randn(latents.shape[0], device=latents.device, generator=self.rng_generator) - 1)
-        sigma = torch.exp(log_sigma)
+        sigma = torch.exp(log_sigma).view(-1, 1, 1, 1)
         # Compute the EDM scaling factors
-        c_in = (1 / torch.sqrt(self.sigma_data**2 + sigma**2)).view(-1, 1, 1, 1)
+        c_in = (1 / torch.sqrt(self.sigma_data**2 + sigma**2))
         c_noise = log_sigma / 4
-        c_skip = (self.sigma_data**2 / (self.sigma_data**2 + sigma**2)).view(-1, 1, 1, 1)
-        c_out = (sigma * self.sigma_data / torch.sqrt(self.sigma_data**2 + sigma**2)).view(-1, 1, 1, 1)
-        loss_lambda = (self.sigma_data**2 + sigma**2) / (self.sigma_data**2 * sigma**2)
+        c_skip = (self.sigma_data**2 / (self.sigma_data**2 + sigma**2))
+        c_out = (sigma * self.sigma_data / torch.sqrt(self.sigma_data**2 + sigma**2))
         # Then, add the noise to the latents according to EDM's forward process
         noise = torch.randn(*latents.shape, device=latents.device, generator=self.rng_generator)
-        noised_latents = latents + sigma.view(-1, 1, 1, 1) * noise
+        noised_latents = latents + sigma * noise
         # Compute the model inputs using the EDM c_in scaling
         model_inputs = c_in * noised_latents
         # Compute the targets using the EDM c_out scaling
-        targets = 1 / c_out * ((1 - c_skip) * latents + c_skip * sigma.view(-1, 1, 1, 1) * noise)
-        return model_inputs, c_noise, targets, loss_lambda
+        targets = 1 / c_out * ((1 - c_skip) * latents + c_skip * sigma * noise)
+        return model_inputs, c_noise, targets
 
     def forward(self, batch):
         latents, text_embeds, text_pooled_embeds, attention_mask, encoder_attention_mask = None, None, None, None, None
@@ -155,7 +154,7 @@ class EDMDiffusion(ComposerModel):
                 text_pooled_embeds *= batch['drop_caption_mask'].view(-1, 1)
 
         # Perform forward diffusion according to the EDM framework
-        model_inputs, c_noise, targets, loss_lambda = self.edm_forward(latents)
+        model_inputs, c_noise, targets = self.edm_forward(latents)
 
         added_cond_kwargs = {}
         # Prepare added time ids & embeddings
@@ -168,13 +167,10 @@ class EDMDiffusion(ComposerModel):
                          c_noise,
                          text_embeds,
                          encoder_attention_mask=encoder_attention_mask,
-                         added_cond_kwargs=added_cond_kwargs)['sample'], targets, loss_lambda
+                         added_cond_kwargs=added_cond_kwargs)['sample'], targets
 
     def loss(self, outputs, batch):
-        """Loss between unet output and added noise, typically mse."""
-        #unweighted_loss = F.mse_loss(outputs[0], outputs[1], reduction='none').mean(dim=(1, 2, 3))
-        #weighted_loss = outputs[2] * unweighted_loss
-        #return torch.mean(weighted_loss)
+        """Loss between unet output and targets."""
         return F.mse_loss(outputs[0], outputs[1])
 
     def eval_forward(self, batch, outputs=None):
@@ -199,7 +195,7 @@ class EDMDiffusion(ComposerModel):
         rho = 7
         s_max_rho = 80**(1 / rho)
         s_min_rho = 0.002**(1 / rho)
-        timesteps = [(s_max_rho + i / (N - 1) * (s_min_rho - s_max_rho))**(1 / rho) for i in range(N)]
+        timesteps = [(s_max_rho + i / (N - 1) * (s_min_rho - s_max_rho))**(rho) for i in range(N)]
         return timesteps
 
     @torch.no_grad()
@@ -385,6 +381,7 @@ class EDMDiffusion(ComposerModel):
                 delta_t = timesteps[i] - timesteps[(i + 1)]
             else:
                 delta_t = timesteps[i]
+            print(t, delta_t)
             latents = latents + noise * delta_t
 
         # We now use the vae to decode the generated latents back into the image.
