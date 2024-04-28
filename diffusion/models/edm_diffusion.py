@@ -354,12 +354,18 @@ class EDMDiffusion(ComposerModel):
             else:
                 latent_model_input = latents
 
-            sigma = t * torch.ones(latents.shape[0], device=device)
+            log_sigma = torch.log(t * torch.ones(latent_model_input.shape[0], device=device))
+            sigma = (t * torch.ones(latents.shape[0], device=device)).view(-1, 1, 1, 1)
             # Compute the EDM scaling factors
-            c_in = 1 / torch.sqrt(self.sigma_data**2 + sigma**2)
-            c_noise = torch.log(sigma) / 4
+            c_noise = log_sigma / 4
+            c_in = (1 / torch.sqrt(self.sigma_data**2 + sigma**2))
+            if do_classifier_free_guidance:
+                c_in = torch.cat([c_in] * 2)
+            c_skip = (self.sigma_data**2 / (self.sigma_data**2 + sigma**2))
+            c_out = (sigma * self.sigma_data / torch.sqrt(self.sigma_data**2 + sigma**2))
             # Model prediction
-            pred = self.unet(c_in * latent_model_input,
+            scaled_model_input = c_in * latent_model_input
+            pred = self.unet(scaled_model_input,
                              c_noise,
                              encoder_hidden_states=text_embeddings,
                              encoder_attention_mask=encoder_attn_mask,
@@ -375,13 +381,14 @@ class EDMDiffusion(ComposerModel):
                     std_cfg = torch.std(pred, dim=(1, 2, 3), keepdim=True)
                     pred_rescaled = pred * (std_pos / std_cfg)
                     pred = pred_rescaled * rescaled_guidance + pred * (1 - rescaled_guidance)
+            # Compute the predicted sample from the network output
+            D_pred = c_skip * latents + c_out * pred
             # compute the previous noisy sample x_t -> x_t-1.
-            noise = (latents - pred) / t
+            noise = (latents - D_pred) / t
             if i < len(timesteps) - 1:
                 delta_t = timesteps[i] - timesteps[(i + 1)]
             else:
                 delta_t = timesteps[i]
-            print(t, delta_t)
             latents = latents + noise * delta_t
 
         # We now use the vae to decode the generated latents back into the image.
