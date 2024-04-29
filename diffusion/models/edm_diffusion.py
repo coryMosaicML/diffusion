@@ -434,7 +434,6 @@ class EDMDiffusion(ComposerModel):
             else:
                 noise_refined = noise_proposed
             latents = latents - 0.5 * (noise_proposed + noise_refined) * delta_t
-            print(t, latents.mean(), latents.std())
 
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
