@@ -123,7 +123,7 @@ class EDMDiffusion(ComposerModel):
         # Compute the model inputs using the EDM c_in scaling
         model_inputs = c_in * noised_latents
         # Compute the targets using the EDM c_out scaling
-        targets = 1 / c_out * ((1 - c_skip) * latents + c_skip * sigma * noise)
+        targets = 1 / c_out * ((1 - c_skip) * latents - c_skip * sigma * noise)
         return model_inputs, c_noise, targets
 
     def forward(self, batch):
@@ -385,13 +385,11 @@ class EDMDiffusion(ComposerModel):
             # Compute the predicted sample from the network output
             D_pred = c_skip * latents + c_out * pred
             # compute the previous noisy sample x_t -> x_t-1.
-            noise = (latents - D_pred) / t
             if i < len(timesteps) - 1:
                 delta_t = timesteps[i] - timesteps[(i + 1)]
             else:
                 delta_t = timesteps[i]
-            latents = latents - noise * delta_t
-
+            latents = latents - (latents - D_pred) * (delta_t / t)
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
         latents = latents * self.latent_std + self.latent_mean
