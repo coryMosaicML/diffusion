@@ -198,6 +198,54 @@ class EDMDiffusion(ComposerModel):
         timesteps = [(s_max_rho + i / (N - 1) * (s_min_rho - s_max_rho))**(rho) for i in range(N)]
         return timesteps
 
+    def predict_noise_from_latents(
+        self,
+        latents: torch.Tensor,
+        timestep: float,
+        do_classifier_free_guidance: bool,
+        guidance_scale: Optional[float],
+        rescaled_guidance: Optional[float],
+        text_embeddings: torch.Tensor,
+        encoder_attn_mask: torch.Tensor,
+        added_cond_kwargs: dict,
+        device: torch.device,
+    ):
+        if do_classifier_free_guidance:
+            latent_model_input = torch.cat([latents] * 2)
+        else:
+            latent_model_input = latents
+        log_sigma = torch.log(timestep * torch.ones(latent_model_input.shape[0], device=device))
+        sigma = (timestep * torch.ones(latents.shape[0], device=device)).view(-1, 1, 1, 1)
+        # Compute the EDM scaling factors
+        c_noise = log_sigma / 4
+        c_in = 1 / torch.sqrt(self.sigma_data**2 + sigma**2)
+        if do_classifier_free_guidance:
+            c_in = torch.cat([c_in] * 2)
+        c_skip = (self.sigma_data**2 / (self.sigma_data**2 + sigma**2))
+        c_out = (sigma * self.sigma_data / torch.sqrt(self.sigma_data**2 + sigma**2))
+        # Model prediction
+        scaled_model_input = c_in * latent_model_input
+        pred = self.unet(scaled_model_input,
+                         c_noise,
+                         encoder_hidden_states=text_embeddings,
+                         encoder_attention_mask=encoder_attn_mask,
+                         added_cond_kwargs=added_cond_kwargs).sample
+
+        if do_classifier_free_guidance:
+            # perform guidance. Note this is only techincally correct for prediction_type 'epsilon'
+            pred_uncond, pred_text = pred.chunk(2)
+            pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
+            # Optionally rescale the classifer free guidance
+            if rescaled_guidance is not None:
+                std_pos = torch.std(pred_text, dim=(1, 2, 3), keepdim=True)
+                std_cfg = torch.std(pred, dim=(1, 2, 3), keepdim=True)
+                pred_rescaled = pred * (std_pos / std_cfg)
+                pred = pred_rescaled * rescaled_guidance + pred * (1 - rescaled_guidance)
+        # Compute the predicted sample from the network output
+        D_pred = c_skip * latents + c_out * pred
+        noise = (latents - D_pred) / timestep
+        return noise
+
     @torch.no_grad()
     def generate(
         self,
@@ -350,46 +398,44 @@ class EDMDiffusion(ComposerModel):
         # For EDM, latents need to be scaled up by the noise level
         latents = latents * timesteps[0]
         for i, t in enumerate(timesteps):
-            if do_classifier_free_guidance:
-                latent_model_input = torch.cat([latents] * 2)
-            else:
-                latent_model_input = latents
-
-            log_sigma = torch.log(t * torch.ones(latent_model_input.shape[0], device=device))
-            sigma = (t * torch.ones(latents.shape[0], device=device)).view(-1, 1, 1, 1)
-            # Compute the EDM scaling factors
-            c_noise = log_sigma / 4
-            c_in = 1 / torch.sqrt(self.sigma_data**2 + sigma**2)
-            if do_classifier_free_guidance:
-                c_in = torch.cat([c_in] * 2)
-            c_skip = (self.sigma_data**2 / (self.sigma_data**2 + sigma**2))
-            c_out = (sigma * self.sigma_data / torch.sqrt(self.sigma_data**2 + sigma**2))
-            # Model prediction
-            scaled_model_input = c_in * latent_model_input
-            pred = self.unet(scaled_model_input,
-                             c_noise,
-                             encoder_hidden_states=text_embeddings,
-                             encoder_attention_mask=encoder_attn_mask,
-                             added_cond_kwargs=added_cond_kwargs).sample
-
-            if do_classifier_free_guidance:
-                # perform guidance. Note this is only techincally correct for prediction_type 'epsilon'
-                pred_uncond, pred_text = pred.chunk(2)
-                pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
-                # Optionally rescale the classifer free guidance
-                if rescaled_guidance is not None:
-                    std_pos = torch.std(pred_text, dim=(1, 2, 3), keepdim=True)
-                    std_cfg = torch.std(pred, dim=(1, 2, 3), keepdim=True)
-                    pred_rescaled = pred * (std_pos / std_cfg)
-                    pred = pred_rescaled * rescaled_guidance + pred * (1 - rescaled_guidance)
-            # Compute the predicted sample from the network output
-            D_pred = c_skip * latents + c_out * pred
+            # First half of Heun's method: Use an Euler step to estimate the latents at the next timestep
+            noise_proposed = self.predict_noise_from_latents(
+                latents=latents,
+                timestep=t,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                guidance_scale=guidance_scale,
+                rescaled_guidance=rescaled_guidance,
+                text_embeddings=text_embeddings,
+                encoder_attn_mask=encoder_attn_mask,
+                added_cond_kwargs=added_cond_kwargs,
+                device=device,
+            )
             # compute the previous noisy sample x_t -> x_t-1.
             if i < len(timesteps) - 1:
                 delta_t = timesteps[i] - timesteps[(i + 1)]
             else:
                 delta_t = timesteps[i]
-            latents = latents - (latents - D_pred) * (delta_t / t)
+            latents_proposed = latents - noise_proposed * delta_t
+            # Second half of Heun's method: Use the estimated latents to make a better estimate of the slope(noise).
+            # Only do this if the next timestep is not zero. Otherwise just use the Euler step.
+            if i < len(timesteps) - 1:
+                t_new = timesteps[i + 1]
+                noise_refined = self.predict_noise_from_latents(
+                    latents=latents_proposed,
+                    timestep=t_new,
+                    do_classifier_free_guidance=do_classifier_free_guidance,
+                    guidance_scale=guidance_scale,
+                    rescaled_guidance=rescaled_guidance,
+                    text_embeddings=text_embeddings,
+                    encoder_attn_mask=encoder_attn_mask,
+                    added_cond_kwargs=added_cond_kwargs,
+                    device=device,
+                )
+            else:
+                noise_refined = noise_proposed
+            latents = latents - 0.5 * (noise_proposed + noise_refined) * delta_t
+            print(t, latents.mean(), latents.std())
+
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
         latents = latents * self.latent_std + self.latent_mean
