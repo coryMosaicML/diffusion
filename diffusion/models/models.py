@@ -425,6 +425,7 @@ def build_autoencoder(input_channels: int = 3,
                       zero_init_last: bool = False,
                       use_attention: bool = True,
                       input_key: str = 'image',
+                      freeze_encoder: bool = False,
                       learn_log_var: bool = True,
                       log_var_init: float = 0.0,
                       kl_divergence_weight: float = 1.0,
@@ -448,6 +449,7 @@ def build_autoencoder(input_channels: int = 3,
         zero_init_last (bool): Whether to zero initialize the last layer in resblocks+discriminator. Default: `False`.
         use_attention (bool): Whether to use attention in the encoder and decoder. Default: `True`.
         input_key (str): Key to use for the input. Default: `image`.
+        freeze_encoder (bool): Whether to freeze the encoder. Default: `False`.
         learn_log_var (bool): Whether to learn the output log variance in the VAE. Default: `True`.
         log_var_init (float): Initial value for the output log variance. Default: `0.0`.
         kl_divergence_weight (float): Weight for the KL divergence loss. Default: `1.0`.
@@ -470,6 +472,7 @@ def build_autoencoder(input_channels: int = 3,
         resample_with_conv=resample_with_conv,
         zero_init_last=zero_init_last,
         use_attention=use_attention,
+        freeze_encoder=freeze_encoder,
     )
 
     # Configure the loss function

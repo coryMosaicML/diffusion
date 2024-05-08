@@ -291,6 +291,7 @@ class AutoEncoder(nn.Module):
         resample_with_conv (bool): Whether to use a conv for down/up sampling. Default: `True`.
         zero_init_last (bool): Whether to initialize the last conv layer to zero. Default: `False`.
         use_attention (bool): Whether to use attention layers. Default: `True`.
+        freeze_encoder (bool): Whether to freeze the encoder. Default: `False`.
     """
 
     def __init__(self,
@@ -305,7 +306,8 @@ class AutoEncoder(nn.Module):
                  dropout_probability: float = 0.0,
                  resample_with_conv: bool = True,
                  zero_init_last: bool = False,
-                 use_attention: bool = True):
+                 use_attention: bool = True,
+                 freeze_encoder: bool = False):
         super().__init__()
         self.config = {}
         self.config['input_channels'] = input_channels
@@ -320,6 +322,7 @@ class AutoEncoder(nn.Module):
         self.config['resample_with_conv'] = resample_with_conv
         self.config['use_attention'] = use_attention
         self.config['zero_init_last'] = zero_init_last
+        self.config['freeze_encoder'] = freeze_encoder
         self.set_extra_state(None)
 
         self.encoder = Encoder(input_channels=self.config['input_channels'],
@@ -363,6 +366,11 @@ class AutoEncoder(nn.Module):
                                          stride=1,
                                          padding=0)
         nn.init.kaiming_normal_(self.post_quant_conv.weight, nonlinearity='linear')
+
+        # Optionally freeze the encoder
+        if self.config['freeze_encoder']:
+            self.encoder.requires_grad_(False)
+            self.quant_conv.requires_grad_(False)
 
     @property
     def device(self) -> torch.device:
