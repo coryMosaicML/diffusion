@@ -456,6 +456,8 @@ class EDMDiffusion(ComposerModel):
                                                return_tensors='pt')
                 tokenized_prompts = tokenized_out['input_ids']
                 tokenized_pad_mask = tokenized_out['attention_mask']
+            if not self.mask_pad_tokens:
+                tokenized_pad_mask = None
             if tokenized_pad_mask is not None:
                 tokenized_pad_mask = tokenized_pad_mask.to(device)
             text_encoder_out = self.text_encoder(tokenized_prompts.to(device), attention_mask=tokenized_pad_mask)
@@ -466,9 +468,6 @@ class EDMDiffusion(ComposerModel):
 
         # duplicate text embeddings for each generation per prompt
         prompt_embeds = _duplicate_tensor(prompt_embeds, num_images_per_prompt)
-
-        if not self.mask_pad_tokens:
-            tokenized_pad_mask = None
 
         if tokenized_pad_mask is not None:
             tokenized_pad_mask = _create_unet_attention_mask(tokenized_pad_mask)
