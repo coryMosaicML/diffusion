@@ -50,6 +50,7 @@ class CleanFIDEvaluator:
         precision (str): The precision to use for evaluation. Default: ``'amp_fp16'``.
         prompts (List[str], optional): The prompts to use for image visualtization.
             Default: ``["A shiba inu wearing a blue sweater]``.
+        sdxl_conditioning (bool): Whether or not to use SDXL conditioning. Default: ``True``.
         additional_generate_kwargs (Dict, optional): Additional keyword arguments to pass to the model.generate method.
 
     """
@@ -71,6 +72,7 @@ class CleanFIDEvaluator:
                  num_samples: Optional[int] = None,
                  precision: str = 'amp_fp16',
                  prompts: Optional[List[str]] = None,
+                 sdxl_conditioning: bool = True,
                  additional_generate_kwargs: Optional[Dict] = None):
         self.model = model
         self.tokenizer: PreTrainedTokenizerBase = model.tokenizer
@@ -89,7 +91,7 @@ class CleanFIDEvaluator:
         self.precision = precision
         self.prompts = prompts if prompts is not None else ['A shiba inu wearing a blue sweater']
         self.additional_generate_kwargs = additional_generate_kwargs if additional_generate_kwargs is not None else {}
-        self.sdxl = model.sdxl
+        self.sdxl_conditioning = sdxl_conditioning
 
         # Init loggers
         if self.loggers and dist.get_local_rank() == 0:
@@ -147,7 +149,7 @@ class CleanFIDEvaluator:
 
             real_images = batch[self.image_key]
             captions = batch[self.caption_key]
-            if self.sdxl:
+            if self.sdxl_conditioning:
                 crop_params = batch['cond_crops_coords_top_left']
                 input_size_params = batch['cond_original_size']
             else:
