@@ -3,6 +3,6 @@
 
 """Inference endpoint."""
 
-from diffusion.inference.inference_model import StableDiffusionInference, StableDiffusionXLInference
+from diffusion.inference.inference_model import EDMInference, StableDiffusionInference, StableDiffusionXLInference
 
-__all__ = ['StableDiffusionInference', 'StableDiffusionXLInference']
+__all__ = ['EDMInference', 'StableDiffusionInference', 'StableDiffusionXLInference']
