@@ -476,28 +476,28 @@ def stable_diffusion_xl(
     return model
 
 
-def rf_diffusion(tokenizer_names: Union[str, Tuple[str,
-                                                   ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/tokenizer',
-                                                            'stabilityai/stable-diffusion-xl-base-1.0/tokenizer_2'),
-                 text_encoder_names: Union[str,
-                                           Tuple[str,
-                                                 ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/text_encoder',
-                                                          'stabilityai/stable-diffusion-xl-base-1.0/text_encoder_2'),
-                 unet_model_name: str = 'stabilityai/stable-diffusion-xl-base-1.0',
-                 vae_model_name: str = 'madebyollin/sdxl-vae-fp16-fix',
-                 pretrained: bool = True,
-                 autoencoder_path: Optional[str] = None,
-                 autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
-                 latent_mean: Union[float, Tuple, str] = 0.0,
-                 latent_std: Union[float, Tuple, str] = 7.67754318618,
-                 train_metrics: Optional[List] = None,
-                 val_metrics: Optional[List] = None,
-                 val_seed: int = 1138,
-                 mask_pad_tokens: bool = False,
-                 clip_qkv: Optional[float] = None,
-                 use_xformers: bool = True,
-                 timestep_m: float = 0.0,
-                 timestep_s: float = 1.0):
+def rf_diffusion(
+    tokenizer_names: Union[str, Tuple[str, ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/tokenizer',
+                                                    'stabilityai/stable-diffusion-xl-base-1.0/tokenizer_2'),
+    text_encoder_names: Union[str, Tuple[str, ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/text_encoder',
+                                                       'stabilityai/stable-diffusion-xl-base-1.0/text_encoder_2'),
+    unet_model_name: str = 'stabilityai/stable-diffusion-xl-base-1.0',
+    vae_model_name: str = 'madebyollin/sdxl-vae-fp16-fix',
+    pretrained: bool = True,
+    autoencoder_path: Optional[str] = None,
+    autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
+    latent_mean: Union[float, Tuple, str] = 0.0,
+    latent_std: Union[float, Tuple, str] = 7.67754318618,
+    train_metrics: Optional[List] = None,
+    val_metrics: Optional[List] = None,
+    val_seed: int = 1138,
+    mask_pad_tokens: bool = False,
+    clip_qkv: Optional[float] = None,
+    use_xformers: bool = True,
+    timestep_m: float = 0.0,
+    timestep_s: float = 1.0,
+    timestep_shift: float = 1.0,
+):
     """RF diffusion training with SDXL UNet and VAE.
 
     Requires batches of matched images and text prompts to train. Generates images from text
@@ -536,6 +536,8 @@ def rf_diffusion(tokenizer_names: Union[str, Tuple[str,
         use_xformers (bool): Whether to use xformers for attention. Defaults to True.
         timestep_m (float): The logit mean of the timestep noise. Default: 0.0.
         timestep_s (float): The logit std. dev. of the timestep noise. Default: 1.0.
+        timestep_shift (float): The shift of the timestep noise. A value of `1.0` means no shifting will be
+            done. Default: 1.0.
     """
     latent_mean, latent_std = _parse_latent_statistics(latent_mean), _parse_latent_statistics(latent_std)
 
@@ -649,6 +651,7 @@ def rf_diffusion(tokenizer_names: Union[str, Tuple[str,
         mask_pad_tokens=mask_pad_tokens,
         timestep_m=timestep_m,
         timestep_s=timestep_s,
+        timestep_shift=timestep_shift,
     )
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)

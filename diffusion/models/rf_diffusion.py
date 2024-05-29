@@ -46,24 +46,29 @@ class RFDiffusion(ComposerModel):
             Default: `False`.
         timestep_m (float): The m parameter of the timestep distribution logit normal. Default: `0.0`.
         timestep_s (float): The s parameter of the timestep distribution logit normal. Default: `1.0`.
+        timestep_shift (float): The shift parameter for the timestep schedule. A value of `1.0` means
+            no shifting is done. Default: `1.0`.
     """
 
-    def __init__(self,
-                 unet,
-                 vae,
-                 text_encoder,
-                 tokenizer,
-                 latent_mean: Optional[Tuple[float]] = None,
-                 latent_std: Optional[Tuple[float]] = None,
-                 downsample_factor: int = 8,
-                 train_metrics: Optional[List] = None,
-                 val_metrics: Optional[List] = None,
-                 val_seed: int = 1138,
-                 image_key: str = 'image',
-                 text_key: str = 'captions',
-                 mask_pad_tokens: bool = False,
-                 timestep_m: float = 0.0,
-                 timestep_s: float = 1.0):
+    def __init__(
+        self,
+        unet,
+        vae,
+        text_encoder,
+        tokenizer,
+        latent_mean: Optional[Tuple[float]] = None,
+        latent_std: Optional[Tuple[float]] = None,
+        downsample_factor: int = 8,
+        train_metrics: Optional[List] = None,
+        val_metrics: Optional[List] = None,
+        val_seed: int = 1138,
+        image_key: str = 'image',
+        text_key: str = 'captions',
+        mask_pad_tokens: bool = False,
+        timestep_m: float = 0.0,
+        timestep_s: float = 1.0,
+        timestep_shift: float = 1.0,
+    ):
         super().__init__()
         self.unet = unet
         self.vae = vae
@@ -100,6 +105,7 @@ class RFDiffusion(ComposerModel):
         # Timestep distribution parameters
         self.timestep_m = timestep_m
         self.timestep_s = timestep_s
+        self.timestep_shift = timestep_shift
 
     def _apply(self, fn):
         super(RFDiffusion, self)._apply(fn)
@@ -117,7 +123,7 @@ class RFDiffusion(ComposerModel):
         u = torch.randn(latents.shape[0], device=latents.device, generator=self.rng_generator)
         u = self.timestep_m + self.timestep_s * u
         timesteps = torch.sigmoid(u).view(-1, 1, 1, 1)
-        # TODO: Optionally have a shift according to resolution here
+        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
         # Then, add the noise to the latents according to the recitified flow
         noise = torch.randn(*latents.shape, device=latents.device, generator=self.rng_generator)
         noised_latents = (1 - timesteps) * latents + timesteps * noise
@@ -191,7 +197,9 @@ class RFDiffusion(ComposerModel):
         metric.update(outputs[0], outputs[1])
 
     def make_sampling_timesteps(self, N: int):
-        return torch.linspace(1, 0, N)
+        timesteps = torch.linspace(1, 0, N)
+        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
+        return timesteps
 
     def predict_velocity_from_latents(
         self,
