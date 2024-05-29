@@ -6,6 +6,7 @@
 from diffusion.models.models import (build_autoencoder, build_diffusers_autoencoder, continuous_pixel_diffusion,
                                      discrete_pixel_diffusion, stable_diffusion_2, stable_diffusion_xl)
 from diffusion.models.pixel_diffusion import PixelDiffusion
+from diffusion.models.rf_diffusion import RFDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     'continuous_pixel_diffusion',
     'discrete_pixel_diffusion',
     'PixelDiffusion',
+    'RFDiffusion',
     'stable_diffusion_2',
     'stable_diffusion_xl',
     'StableDiffusion',
