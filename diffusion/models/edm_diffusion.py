@@ -259,7 +259,7 @@ class EDMDiffusion(ComposerModel):
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
-        num_inference_steps: int = 50,
+        num_inference_steps: int = 25,
         guidance_scale: Optional[float] = 3.0,
         rescaled_guidance: Optional[float] = None,
         num_images_per_prompt: Optional[int] = 1,
