@@ -201,9 +201,9 @@ class StableDiffusion(ComposerModel):
             with c:
                 # Encode the images to the latent space.
                 if self.encode_latents_in_fp16:
-                    latents = self.vae.encode(inputs.half())['latent_dist'].sample().data
+                    latents = self.vae.encode(inputs.half())['latent_dist'].mode().data
                 else:
-                    latents = self.vae.encode(inputs)['latent_dist'].sample().data
+                    latents = self.vae.encode(inputs)['latent_dist'].mode().data
                 # Encode tokenized prompt into embedded text and pooled text embeddings
                 text_encoder_out = self.text_encoder(conditionings, attention_mask=attention_mask)
                 text_embeds = text_encoder_out[0]

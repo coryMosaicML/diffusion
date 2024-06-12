@@ -1,13 +1,24 @@
 # Copyright 2022 MosaicML Diffusion authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Utils for working with diffusion  schedulers."""
+"""Helpful functions for working with diffusion schedulers."""
 
 import torch
 
 
 def shift_noise_schedule(noise_scheduler, base_dim: int = 64, shift_dim: int = 64):
-    """Shifts the function SNR(t) for a noise scheduler to correct for resolution changes."""
+    """Shifts the function SNR(t) for a noise scheduler to correct for resolution changes.
+
+    Implements the technique from https://arxiv.org/abs/2301.11093
+
+    Args:
+        noise_scheduler (diffusers.SchedulerMixin): The noise scheduler to shift.
+        base_dim (int): The base side length of the schedule resolution.
+        shift_dim (int): The new side length of the schedule resolution.
+
+    Returns:
+        diffusers.SchedulerMixin: The shifted noise scheduler.
+    """
     # First, we need to get the original SNR(t) function
     alpha_bar = noise_scheduler.alphas_cumprod
     SNR = alpha_bar / (1 - alpha_bar)
