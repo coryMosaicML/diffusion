@@ -412,7 +412,7 @@ def stable_diffusion_xl(
 
     # Make the noise schedulers
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000,
-                                    beta_start=0.00085,
+                                    beta_start=0.0000085,
                                     beta_end=0.012,
                                     beta_schedule=beta_schedule,
                                     trained_betas=None,
@@ -425,7 +425,7 @@ def stable_diffusion_xl(
                                     rescale_betas_zero_snr=zero_terminal_snr)
     if beta_schedule == 'squaredcos_cap_v2':
         inference_noise_scheduler = DDIMScheduler(num_train_timesteps=1000,
-                                                  beta_start=0.00085,
+                                                  beta_start=0.0000085,
                                                   beta_end=0.012,
                                                   beta_schedule=beta_schedule,
                                                   trained_betas=None,
@@ -435,7 +435,7 @@ def stable_diffusion_xl(
                                                   rescale_betas_zero_snr=zero_terminal_snr)
     else:
         inference_noise_scheduler = EulerDiscreteScheduler(num_train_timesteps=1000,
-                                                           beta_start=0.00085,
+                                                           beta_start=0.0000085,
                                                            beta_end=0.012,
                                                            beta_schedule=beta_schedule,
                                                            trained_betas=None,
