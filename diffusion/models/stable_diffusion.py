@@ -73,6 +73,7 @@ class StableDiffusion(ComposerModel):
             Default: `False`.
         mask_pad_tokens (bool): whether to mask pad tokens in unet cross attention.
             Default: `False`.
+        use_mode (bool): whether to use mode for sampling during training. Default: `False`.
         sdxl (bool): Whether or not we're training SDXL. Default: `False`.
     """
 
@@ -101,6 +102,7 @@ class StableDiffusion(ComposerModel):
                  precomputed_latents: bool = False,
                  encode_latents_in_fp16: bool = False,
                  mask_pad_tokens: bool = False,
+                 use_mode: bool = False,
                  fsdp: bool = False,
                  sdxl: bool = False):
         super().__init__()
@@ -120,6 +122,7 @@ class StableDiffusion(ComposerModel):
         self.image_latents_key = image_latents_key
         self.precomputed_latents = precomputed_latents
         self.mask_pad_tokens = mask_pad_tokens
+        self.use_mode = use_mode
         self.sdxl = sdxl
         if latent_mean is None:
             self.latent_mean = 4 * (0.0)
@@ -201,9 +204,13 @@ class StableDiffusion(ComposerModel):
             with c:
                 # Encode the images to the latent space.
                 if self.encode_latents_in_fp16:
-                    latents = self.vae.encode(inputs.half())['latent_dist'].sample().data
+                    latent_dist = self.vae.encode(inputs.half())['latent_dist']
                 else:
-                    latents = self.vae.encode(inputs)['latent_dist'].sample().data
+                    latent_dist = self.vae.encode(inputs)['latent_dist']
+                if self.use_mode:
+                    latents = latent_dist.mode().data
+                else:
+                    latents = latent_dist.sample().data
                 # Encode tokenized prompt into embedded text and pooled text embeddings
                 text_encoder_out = self.text_encoder(conditionings, attention_mask=attention_mask)
                 text_embeds = text_encoder_out[0]

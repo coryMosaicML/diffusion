@@ -63,6 +63,7 @@ def stable_diffusion_2(
     precomputed_latents: bool = False,
     encode_latents_in_fp16: bool = True,
     mask_pad_tokens: bool = False,
+    use_mode: bool = False,
     fsdp: bool = True,
     clip_qkv: Optional[float] = None,
     use_xformers: bool = True,
@@ -106,6 +107,7 @@ def stable_diffusion_2(
         scheduler_shift_resolution (int): The resolution to shift the noise scheduler to. Default: `256`.
         encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
         mask_pad_tokens (bool): Whether to mask pad tokens in cross attention. Defaults to False.
+        use_mode (bool): Whether to use the mode of the latent distribution for the prediction. Defaults to False.
         fsdp (bool): Whether to use FSDP. Defaults to True.
         clip_qkv (float, optional): If not None, clip the qkv values to this value. Defaults to None.
         use_xformers (bool): Whether to use xformers for attention. Defaults to True.
@@ -214,6 +216,7 @@ def stable_diffusion_2(
         precomputed_latents=precomputed_latents,
         encode_latents_in_fp16=encode_latents_in_fp16,
         mask_pad_tokens=mask_pad_tokens,
+        use_mode=use_mode,
         fsdp=fsdp,
     )
     if torch.cuda.is_available():
@@ -262,6 +265,7 @@ def stable_diffusion_xl(
     precomputed_latents: bool = False,
     encode_latents_in_fp16: bool = True,
     mask_pad_tokens: bool = False,
+    use_mode: bool = False,
     fsdp: bool = True,
     clip_qkv: Optional[float] = None,
     use_xformers: bool = True,
@@ -316,6 +320,7 @@ def stable_diffusion_xl(
         precomputed_latents (bool): Whether to use precomputed latents. Defaults to False.
         encode_latents_in_fp16 (bool): Whether to encode latents in fp16. Defaults to True.
         mask_pad_tokens (bool): Whether to mask pad tokens in cross attention. Defaults to False.
+        use_mode (bool): Whether to use the mode of the latent distribution for the prediction. Defaults to False.
         fsdp (bool): Whether to use FSDP. Defaults to True.
         clip_qkv (float, optional): If not None, clip the qkv values to this value. Improves stability of training.
             Default: ``None``.
@@ -483,6 +488,7 @@ def stable_diffusion_xl(
         precomputed_latents=precomputed_latents,
         encode_latents_in_fp16=encode_latents_in_fp16,
         mask_pad_tokens=mask_pad_tokens,
+        use_mode=use_mode,
         fsdp=fsdp,
         sdxl=True,
     )

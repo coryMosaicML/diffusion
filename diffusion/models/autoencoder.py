@@ -256,6 +256,10 @@ class GaussianDistribution:
         """Sample from the distribution."""
         return self.mean + self.std * torch.randn_like(self.mean)
 
+    def mode(self) -> torch.Tensor:
+        """Get the mode of the distribution."""
+        return self.mean
+
 
 class AutoEncoderOutput:
     """Output from an autoencoder."""
