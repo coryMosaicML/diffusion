@@ -552,7 +552,7 @@ def text_to_image_transformer(
                                     clip_sample=False,
                                     prediction_type=prediction_type,
                                     sample_max_value=1.0,
-                                    timestep_spacing='trailing',
+                                    timestep_spacing='leading',
                                     steps_offset=1,
                                     rescale_betas_zero_snr=zero_terminal_snr)
     inference_noise_scheduler = EulerDiscreteScheduler(num_train_timesteps=1000,
@@ -563,7 +563,7 @@ def text_to_image_transformer(
                                                        prediction_type=prediction_type,
                                                        interpolation_type='linear',
                                                        use_karras_sigmas=use_karras_sigmas,
-                                                       timestep_spacing='trailing',
+                                                       timestep_spacing='leading',
                                                        steps_offset=1,
                                                        rescale_betas_zero_snr=zero_terminal_snr)
 
