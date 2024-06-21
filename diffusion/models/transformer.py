@@ -89,33 +89,21 @@ class PreAttentionBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.num_features = num_features
-
-        # AdaLN MLP for pre-attention. Initialized to zero so modulation acts as identity at initialization.
-        self.adaLN_mlp_linear = nn.Linear(self.num_features, 2 * self.num_features, bias=True)
-        nn.init.zeros_(self.adaLN_mlp_linear.weight)
-        nn.init.zeros_(self.adaLN_mlp_linear.bias)
-        self.adaLN_mlp = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear)
         # Input layernorm
         self.input_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
         # Linear layer to get q, k, and v
         self.qkv = nn.Linear(self.num_features, 3 * self.num_features)
-        # QK layernorms. Original MMDiT used RMSNorm here.
-        self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
-        self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
         # Initialize all biases to zero
         nn.init.zeros_(self.qkv.bias)
         # Init the standard deviation of the weights to 0.02 as is tradition
         nn.init.normal_(self.qkv.weight, std=0.02)
 
-    def forward(self, x, t):
-        # Calculate the modulations
-        mods = self.adaLN_mlp(t).unsqueeze(1).chunk(2, dim=2)
+    def forward(self, x, t, shift, scale):
         # Forward, with modulations
-        x = modulate(self.input_norm(x), mods[0], mods[1])
+        y = self.input_norm(x)
+        y = modulate(y, shift, scale)
         # Calculate the query, key, and values all in one go
-        q, k, v = self.qkv(x).chunk(3, dim=-1)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q, k, v = self.qkv(y).chunk(3, dim=-1)
         return q, k, v
 
 
@@ -148,11 +136,6 @@ class PostAttentionBlock(nn.Module):
         super().__init__()
         self.num_features = num_features
         self.expansion_factor = expansion_factor
-        # AdaLN MLP for post-attention. Initialized to zero so modulation acts as identity at initialization.
-        self.adaLN_mlp_linear = nn.Linear(self.num_features, 4 * self.num_features, bias=True)
-        nn.init.zeros_(self.adaLN_mlp_linear.weight)
-        nn.init.zeros_(self.adaLN_mlp_linear.bias)
-        self.adaLN_mlp = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear)
         # Linear layer to process v
         self.linear_v = nn.Linear(self.num_features, self.num_features)
         # Layernorm for the output
@@ -167,35 +150,43 @@ class PostAttentionBlock(nn.Module):
         # Output MLP
         self.output_mlp = nn.Sequential(self.linear_1, self.nonlinearity, self.linear_2)
 
-    def forward(self, v, x, t):
+    def forward(self, v, x, t, shift, scale, gate1, gate2):
         """Forward takes v from self attention and the original sequence x with scalar conditioning t."""
-        # Calculate the modulations
-        mods = self.adaLN_mlp(t).unsqueeze(1).chunk(4, dim=2)
-        # Postprocess v with linear + gating modulation
-        y = mods[0] * self.linear_v(v)
-        y = x + y
+        # Postprocess v with linear + optional gating modulation
+        y = self.linear_v(v)
+        y = x + gate1 * y
         # Adaptive layernorm
-        y = modulate(self.output_norm(y), mods[1], mods[2])
+        y = modulate(self.output_norm(y), shift, scale)
         # Output MLP
         y = self.output_mlp(y)
-        # Gating modulation for the output
-        y = mods[3] * y
-        y = x + y
+        # Optional gating modulation for the output
+        y = x + gate2 * y
         return y
 
 
 class MMDiTBlock(nn.Module):
     """Transformer block that supports masking, multimodal attention, and adaptive norms."""
 
-    def __init__(self, num_features, num_heads, expansion_factor=4, is_last=False):
+    def __init__(self, num_features, num_heads, expansion_factor=4, qk_norm=False, is_last=False):
         super().__init__()
         self.num_features = num_features
         self.num_heads = num_heads
         self.expansion_factor = expansion_factor
+        self.qk_norm = qk_norm
         self.is_last = is_last
+        # Params for the layerwise modulation shifts
+        self.modulation_shifts = nn.Parameter(torch.zeros(1, 1, 2, 6 * self.num_features))
+        self.modulation_shifts.data[:, :, :, :] = 0.0
         # Pre-attention blocks for two modalities
         self.pre_attention_block_1 = PreAttentionBlock(self.num_features)
         self.pre_attention_block_2 = PreAttentionBlock(self.num_features)
+        # QK layernorms. Original MMDiT used RMSNorm here.
+        if self.qk_norm:
+            self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+            self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        else:
+            self.q_norm = nn.Identity()
+            self.k_norm = nn.Identity()
         # Self-attention
         self.attention = SelfAttention(self.num_features, self.num_heads)
         # Post-attention blocks for two modalities
@@ -203,23 +194,29 @@ class MMDiTBlock(nn.Module):
         if not self.is_last:
             self.post_attention_block_2 = PostAttentionBlock(self.num_features, self.expansion_factor)
 
-    def forward(self, x1, x2, t, mask=None):
+    def forward(self, x1, x2, t, modulations, mask=None):
+        # Optionally create layerwise modulations
+        shifted_modulations = modulations + self.modulation_shifts
+        x1_mods = shifted_modulations[:, :, 0].chunk(6, dim=-1)
+        x2_mods = shifted_modulations[:, :, 1].chunk(6, dim=-1)
         # Pre-attention for the two modalities
-        q1, k1, v1 = self.pre_attention_block_1(x1, t)
-        q2, k2, v2 = self.pre_attention_block_2(x2, t)
+        q1, k1, v1 = self.pre_attention_block_1(x1, t, shift=x1_mods[0], scale=x1_mods[1])
+        q2, k2, v2 = self.pre_attention_block_2(x2, t, shift=x2_mods[0], scale=x2_mods[1])
         # Concat q, k, v along the sequence dimension
         q = torch.cat([q1, q2], dim=1)
         k = torch.cat([k1, k2], dim=1)
         v = torch.cat([v1, v2], dim=1)
         # Self-attention
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         v = self.attention(q, k, v, mask=mask)
         # Split the attention output back into the two modalities
         seq_len_1, seq_len_2 = x1.size(1), x2.size(1)
         y1, y2 = v.split([seq_len_1, seq_len_2], dim=1)
         # Post-attention for the two modalities
-        y1 = self.post_attention_block_1(y1, x1, t)
+        y1 = self.post_attention_block_1(y1, x1, t, x1_mods[2], x1_mods[3], x1_mods[4], x1_mods[5])
         if not self.is_last:
-            y2 = self.post_attention_block_2(y2, x2, t)
+            y2 = self.post_attention_block_2(y2, x2, t, x2_mods[2], x2_mods[3], x2_mods[4], x2_mods[5])
         return y1, y2
 
 
@@ -236,13 +233,15 @@ class DiffusionTransformer(nn.Module):
                  conditioning_features: int = 1024,
                  conditioning_max_sequence_length: int = 77,
                  conditioning_dimension: int = 1,
-                 expansion_factor: int = 4):
+                 expansion_factor: int = 4,
+                 qk_norm: bool = False):
         super().__init__()
         # Params for the network architecture
         self.num_features = num_features
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.expansion_factor = expansion_factor
+        self.qk_norm = qk_norm
         # Params for input embeddings
         self.input_features = input_features
         self.input_dimension = input_dimension
@@ -265,9 +264,18 @@ class DiffusionTransformer(nn.Module):
                                                       self.conditioning_max_sequence_length, self.num_features)
         conditioning_position_embedding /= math.sqrt(self.num_features)
         self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
+
+        # AdaLN MLP for the transformers block
+        self.adaLN_mlp_linear_blocks = nn.Linear(self.num_features, 2 * 6 * self.num_features)
+        self.adaLN_mlp_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        # Init the modulations to zero. This will ensure the block acts as identity at initialization
+        nn.init.zeros_(self.adaLN_mlp_linear_blocks.weight)
+        nn.init.zeros_(self.adaLN_mlp_linear_blocks.bias)
+        self.adaLN_mlp_blocks = nn.Sequential(self.adaLN_mlp_norm, nn.SiLU(), self.adaLN_mlp_linear_blocks)
+
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
-            MMDiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
+            MMDiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor, qk_norm=self.qk_norm)
             for _ in range(self.num_layers - 1)
         ])
         # Turn off post attn layers for conditioning sequence in final block
@@ -310,6 +318,9 @@ class DiffusionTransformer(nn.Module):
         # Optionally add constant conditioning
         if constant_conditioning is not None:
             t = t + constant_conditioning
+        # Create the modulations for the transformer blocks
+        modulations = self.adaLN_mlp_blocks(t)
+        modulations = modulations.view(-1, 2, 6 * self.num_features).unsqueeze(1)
         # Embed the input
         y = self.input_embedding(x)  # (B, T1, C)
         # Get the input position embeddings and add them to the input
@@ -342,7 +353,7 @@ class DiffusionTransformer(nn.Module):
 
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
-            y, c = block(y, c, t, mask=mask)
+            y, c = block(y, c, t, modulations=modulations, mask=mask)
         # Pass through the output layers to get the right number of elements
         mods = self.adaLN_mlp(t).unsqueeze(1).chunk(2, dim=2)
         y = modulate(self.final_norm(y), mods[0], mods[1])
@@ -514,7 +525,7 @@ class ComposerTextToImageMMDiT(ComposerModel):
     def forward(self, batch):
         # Get the inputs
         image, caption, caption_mask = batch[self.image_key], batch[self.caption_key], batch[self.caption_mask_key]
-        
+
         # Get the text embeddings and image latents
         with torch.cuda.amp.autocast(enabled=False):
             latents = self.autoencoder.encode(image.half())['latent_dist'].sample().data

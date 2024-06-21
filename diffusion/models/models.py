@@ -491,6 +491,7 @@ def text_to_image_transformer(
         conditioning_features: int = 768,
         conditioning_max_sequence_length: int = 77,
         patch_size: int = 2,
+        qk_norm: bool = False,
         prediction_type: str = 'epsilon',
         latent_mean: Union[float, Tuple, str] = 0.0,
         latent_std: Union[float, Tuple, str] = 7.67754318618,
@@ -551,7 +552,7 @@ def text_to_image_transformer(
                                     clip_sample=False,
                                     prediction_type=prediction_type,
                                     sample_max_value=1.0,
-                                    timestep_spacing='leading',
+                                    timestep_spacing='trailing',
                                     steps_offset=1,
                                     rescale_betas_zero_snr=zero_terminal_snr)
     inference_noise_scheduler = EulerDiscreteScheduler(num_train_timesteps=1000,
@@ -562,7 +563,7 @@ def text_to_image_transformer(
                                                        prediction_type=prediction_type,
                                                        interpolation_type='linear',
                                                        use_karras_sigmas=use_karras_sigmas,
-                                                       timestep_spacing='leading',
+                                                       timestep_spacing='trailing',
                                                        steps_offset=1,
                                                        rescale_betas_zero_snr=zero_terminal_snr)
 
@@ -576,7 +577,8 @@ def text_to_image_transformer(
                                        conditioning_features=conditioning_features,
                                        conditioning_max_sequence_length=conditioning_max_sequence_length,
                                        conditioning_dimension=1,
-                                       expansion_factor=4)
+                                       expansion_factor=4,
+                                       qk_norm=qk_norm)
     # Make the composer model
     model = ComposerTextToImageMMDiT(model=transformer,
                                      autoencoder=vae,
