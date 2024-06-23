@@ -406,7 +406,7 @@ class ComposerTextToImageMMDiT(ComposerModel):
         image_key: str = 'image',
         caption_key: str = 'caption',
         caption_mask_key: str = 'caption_mask',
-        use_pooled_embedding: bool = False,
+        use_pooled_embedding: bool = True,
     ):
         super().__init__()
         self.model = model
@@ -612,9 +612,14 @@ class ComposerTextToImageMMDiT(ComposerModel):
                                            return_tensors='pt')
             tokenized_prompts = tokenized_out['input_ids'].to(self.text_encoder.device)
             prompt_mask = tokenized_out['attention_mask'].to(self.text_encoder.device)
-            text_embeddings = self.text_encoder(tokenized_prompts, attention_mask=prompt_mask)[0]
+            text_encoder_out = self.text_encoder(tokenized_prompts, attention_mask=prompt_mask)
+            text_embeddings = text_encoder_out[0]
+            pooled_text_embeddings = None
+            if self.use_pooled_embedding:
+                pooled_text_embeddings = text_encoder_out[1]
+                pooled_text_embeddings = self.pooled_projection_layer(pooled_text_embeddings)
             prompt_mask = self.combine_attention_masks(prompt_mask)
-        return text_embeddings, prompt_mask
+        return text_embeddings, prompt_mask, pooled_text_embeddings
 
     @torch.no_grad()
     def generate(self,
@@ -636,17 +641,21 @@ class ComposerTextToImageMMDiT(ComposerModel):
 
         # Get the text embeddings
         if prompt is not None:
-            text_embeddings, prompt_mask = self.embed_prompt(prompt)
+            text_embeddings, prompt_mask, pooled_embedding = self.embed_prompt(prompt)
             text_embeddings_coords = torch.arange(text_embeddings.shape[1], device=text_embeddings.device)
             text_embeddings_coords = text_embeddings_coords.unsqueeze(0).expand(text_embeddings.shape[0], -1)
             text_embeddings_coords = text_embeddings_coords.unsqueeze(-1)
         else:
             raise ValueError('Prompt must be specified')
         if negative_prompt is not None:
-            negative_text_embeddings, negative_prompt_mask = self.embed_prompt(negative_prompt)
+            negative_text_embeddings, negative_prompt_mask, pooled_neg_embedding = self.embed_prompt(negative_prompt)
         else:
             negative_text_embeddings = torch.zeros_like(text_embeddings)
             negative_prompt_mask = torch.zeros_like(prompt_mask)
+            if self.use_pooled_embedding and pooled_embedding is not None:
+                pooled_neg_embedding = torch.zeros_like(pooled_embedding)
+            else:
+                pooled_neg_embedding = None
         negative_text_embeddings_coords = torch.arange(negative_text_embeddings.shape[1],
                                                        device=negative_text_embeddings.device)
         negative_text_embeddings_coords = negative_text_embeddings_coords.unsqueeze(0).expand(
@@ -668,6 +677,8 @@ class ComposerTextToImageMMDiT(ComposerModel):
         text_embeddings_coords = torch.cat([text_embeddings_coords, negative_text_embeddings_coords], dim=0)
         text_embeddings_mask = torch.cat([prompt_mask, negative_prompt_mask], dim=0)
         latent_coords_input = torch.cat([latent_coords, latent_coords], dim=0)
+        if self.use_pooled_embedding and pooled_embedding is not None and pooled_neg_embedding is not None:
+            pooled_embedding = torch.cat([pooled_embedding, pooled_neg_embedding], dim=0)
 
         # Prep for reverse process
         self.inference_scheduler.set_timesteps(num_inference_steps)
@@ -691,7 +702,8 @@ class ComposerTextToImageMMDiT(ComposerModel):
                                    conditioning=text_embeddings,
                                    conditioning_coords=text_embeddings_coords,
                                    input_mask=None,
-                                   conditioning_mask=text_embeddings_mask)
+                                   conditioning_mask=text_embeddings_mask,
+                                   constant_conditioning=pooled_embedding)
             # Do CFG
             pred_cond, pred_uncond = model_out.chunk(2, dim=0)
             pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)

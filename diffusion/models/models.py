@@ -492,6 +492,7 @@ def text_to_image_transformer(
         conditioning_max_sequence_length: int = 77,
         patch_size: int = 2,
         qk_norm: bool = False,
+        use_pooled_embedding: bool = False,
         prediction_type: str = 'epsilon',
         latent_mean: Union[float, Tuple, str] = 0.0,
         latent_std: Union[float, Tuple, str] = 7.67754318618,
@@ -594,7 +595,8 @@ def text_to_image_transformer(
                                      latent_channels=autoencoder_channels,
                                      image_key='image',
                                      caption_key='captions',
-                                     caption_mask_key='attention_mask')
+                                     caption_mask_key='attention_mask',
+                                     use_pooled_embedding=use_pooled_embedding)
 
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
