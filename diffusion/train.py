@@ -21,12 +21,13 @@ from torch.optim import Optimizer
 
 from diffusion.models.autoencoder import ComposerAutoEncoder, ComposerDiffusersAutoEncoder
 from diffusion.models.t2i_transformer import ComposerTextToImageMMDiT
+from diffusion.models.transformer_autoencoder import ComposerTransformerAutoEncoder
 
 
 def make_autoencoder_optimizer(config: DictConfig, model: ComposerModel) -> Optimizer:
     """Configures the optimizer for use with an autoencoder + discriminator loss."""
     print('Configuring opimizer for autoencoder+discriminator')
-    assert isinstance(model, (ComposerAutoEncoder, ComposerDiffusersAutoEncoder))
+    assert isinstance(model, (ComposerAutoEncoder, ComposerDiffusersAutoEncoder, ComposerTransformerAutoEncoder))
 
     # Configure optimizer settings for the autoencoder
     if hasattr(config, 'autoencoder_optimizer'):

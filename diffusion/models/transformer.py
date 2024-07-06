@@ -4,7 +4,7 @@
 """Diffusion Transformer model."""
 
 import math
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -232,6 +232,62 @@ class PostAttentionBlock(nn.Module):
         return y
 
 
+class TransformerBlock(nn.Module):
+    """Basic transformer block that supports masking.
+
+    Args:
+        num_features (int): Number of input features.
+        num_heads (int): Number of attention heads.
+        expansion_factor (int): Expansion factor for the MLP. Default: `4`.
+    """
+
+    def __init__(self, num_features: int, num_heads: int, expansion_factor: int = 4):
+        super().__init__()
+        self.num_features = num_features
+        self.num_heads = num_heads
+        self.expansion_factor = expansion_factor
+        # Input layernorm
+        self.input_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        # Linear layer to get q, k, and v
+        self.qkv = nn.Linear(self.num_features, 3 * self.num_features)
+        # QK layernorms.
+        self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        # Initialize all biases to zero and the standard deviation of the weights to 0.02 as is tradition
+        nn.init.zeros_(self.qkv.bias)
+        nn.init.normal_(self.qkv.weight, std=0.02)
+        # Self-attention
+        self.attention = SelfAttention(self.num_features, self.num_heads)
+        # Linear layer to process v
+        self.linear_v = nn.Linear(self.num_features, self.num_features)
+        # Layernorm for the output
+        self.output_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        # Transformer style MLP layers
+        self.linear_1 = nn.Linear(self.num_features, self.expansion_factor * self.num_features)
+        self.nonlinearity = nn.GELU(approximate='tanh')
+        self.linear_2 = nn.Linear(self.expansion_factor * self.num_features, self.num_features)
+        # Initialize all biases to zero
+        nn.init.zeros_(self.linear_1.bias)
+        nn.init.zeros_(self.linear_2.bias)
+        # Output MLP
+        self.output_mlp = nn.Sequential(self.linear_1, self.nonlinearity, self.linear_2)
+        # Set final layer weights to zero
+        nn.init.zeros_(self.linear_2.weight)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Get qkv
+        q, k, v = self.qkv(self.input_norm(x)).chunk(3, dim=-1)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        # Self-attention
+        v = self.attention(q, k, v, mask=mask)
+        # Post attention transforms
+        y = x + self.linear_v(v)
+        y = self.output_norm(y)
+        y = self.output_mlp(y)
+        return x + y
+
+
 class MMDiTBlock(nn.Module):
     """Transformer block that supports masking, multimodal attention, and adaptive norms.
 
@@ -442,3 +498,129 @@ class DiffusionTransformer(nn.Module):
         y = modulate(self.final_norm(y), mods[0], mods[1])
         y = self.final_linear(y)
         return y
+
+
+class TransformerAutoEncoder(nn.Module):
+    """Transformer based autoencoder.
+
+    Args:
+        input_features (int): Number of features in the input sequence.
+        latent_features (int): Number of features in the latent sequence.
+        num_features (int): Number of features in the transformer.
+        num_heads (int): Number of attention heads.
+        num_layers (int): Number of transformer
+    """
+
+    def __init__(self,
+                 input_features: int,
+                 input_dimension: int,
+                 input_max_sequence_length: int,
+                 latent_features: int,
+                 num_features: int,
+                 num_heads: int,
+                 num_layers: int,
+                 expansion_factor: int = 4):
+        super().__init__()
+        self.config = {}
+        self.config['input_features'] = input_features
+        self.config['input_dimension'] = input_dimension
+        self.config['input_max_sequence_length'] = input_max_sequence_length
+        self.config['latent_features'] = latent_features
+        self.config['num_features'] = num_features
+        self.config['num_heads'] = num_heads
+        self.config['num_layers'] = num_layers
+        self.config['expansion_factor'] = 4
+        self.set_extra_state(None)
+
+        # Input embedding
+        # Projection layer for the input sequence
+        self.input_embedding = nn.Linear(self.config['input_features'], self.config['num_features'])
+        # Embedding layer for the input sequence
+        input_position_embedding = torch.randn(self.config['input_dimension'], self.config['input_max_sequence_length'],
+                                               self.config['num_features'])
+        input_position_embedding /= math.sqrt(self.config['num_features'])
+        self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
+        # Encoder transformer blocks
+        self.encoder_blocks = nn.ModuleList([
+            TransformerBlock(self.config['num_features'],
+                             self.config['num_heads'],
+                             expansion_factor=self.config['expansion_factor'])
+            for _ in range(self.config['num_features'])
+        ])
+        # Latent projections
+        self.project_to_latents = nn.Linear(self.config['num_features'], self.config['latent_features'])
+        self.project_from_latents = nn.Linear(self.config['latent_features'], self.config['num_features'])
+        # Decoder transformer blocks
+        self.decoder_blocks = nn.ModuleList([
+            TransformerBlock(self.config['num_features'],
+                             self.config['num_heads'],
+                             expansion_factor=self.config['expansion_factor'])
+            for _ in range(self.config['num_features'])
+        ])
+        # Output projection layer
+        self.final_norm = nn.LayerNorm(self.config['num_features'], elementwise_affine=True, eps=1e-6)
+        self.final_linear = nn.Linear(self.config['num_features'], self.config['input_features'])
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    def get_extra_state(self):
+        return {'config': self.config}
+
+    def set_extra_state(self, state):
+        pass
+
+    def get_last_layer_weight(self) -> torch.Tensor:
+        """Get the weight of the last layer of the decoder."""
+        return self.final_linear.weight
+
+    def fsdp_wrap_fn(self, module: nn.Module) -> bool:
+        if isinstance(module, TransformerBlock):
+            return True
+        return False
+
+    def activation_checkpointing_fn(self, module: nn.Module) -> bool:
+        if isinstance(module, TransformerBlock):
+            return True
+        return False
+
+    def encode(self, x: torch.Tensor, input_coords: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Encode an input sequence into a latent sequence."""
+        # Embed the input
+        y = self.input_embedding(x)
+        # Get the input position embeddings and add them to the input
+        y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
+        y_position_embeddings = y_position_embeddings.sum(dim=-1)
+        y = y + y_position_embeddings
+        # Pass through the encoder blocks
+        for block in self.encoder_blocks:
+            y = block(y, mask=mask)
+        # Project to latents
+        z = self.project_to_latents(y)
+        return z
+
+    def decode(self, z: torch.Tensor, input_coords: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Decode a latent tensor into an output tensor."""
+        # Project from the latents
+        y = self.project_from_latents(z)
+        # Get the input position embeddings and add them to the input
+        y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
+        y_position_embeddings = y_position_embeddings.sum(dim=-1)
+        y = y + y_position_embeddings
+        # Pass through the decoder blocks
+        for block in self.decoder_blocks:
+            y = block(y, mask=mask)
+        # Pass through the output layers to get the right number of elements
+        y = self.final_norm(y)
+        y = self.final_linear(y)
+        return y
+
+    def forward(self,
+                x: torch.Tensor,
+                input_coords: torch.Tensor,
+                mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Forward through the autoencoder."""
+        z = self.encode(x, input_coords, mask=mask)
+        x_recon = self.decode(z, input_coords, mask=mask)
+        return {'x_recon': x_recon, 'latents': z}

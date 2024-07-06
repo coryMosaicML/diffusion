@@ -20,7 +20,8 @@ from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
 from diffusion.models.t2i_transformer import ComposerTextToImageMMDiT
 from diffusion.models.text_encoder import MultiTextEncoder, MultiTokenizer
-from diffusion.models.transformer import DiffusionTransformer
+from diffusion.models.transformer import DiffusionTransformer, TransformerAutoEncoder
+from diffusion.models.transformer_autoencoder import ComposerTransformerAutoEncoder, TransformerAutoEncoderLoss
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
 
 try:
@@ -605,6 +606,51 @@ def text_to_image_transformer(
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
     return model
+
+
+def build_transformer_autoencoder(input_channels: int = 3,
+                                  patch_size: int = 8,
+                                  input_dimension: int = 2,
+                                  max_image_side: int = 1280,
+                                  latent_features: int = 4,
+                                  num_features: int = 128,
+                                  num_heads: int = 8,
+                                  num_layers: int = 8,
+                                  expansion_factor: int = 4,
+                                  input_key: str = 'image',
+                                  lpips_weight: float = 0.25,
+                                  discriminator_weight: float = 0.5,
+                                  discriminator_num_filters: int = 64,
+                                  discriminator_num_layers: int = 3):
+    """Transformer autoencoder training setup."""
+    # Figure out image sequence length
+    input_max_sequence_length = math.ceil(max_image_side / patch_size)
+
+    # Set up the model
+    transformer = TransformerAutoEncoder(
+        input_features=input_channels * (patch_size**2),
+        input_dimension=input_dimension,
+        input_max_sequence_length=input_max_sequence_length,
+        latent_features=latent_features,
+        num_features=num_features,
+        num_heads=num_heads,
+        num_layers=num_layers,
+    )
+
+    # Configure the loss function
+    loss = TransformerAutoEncoderLoss(input_key=input_key,
+                                      ae_output_channels=input_channels,
+                                      lpips_weight=lpips_weight,
+                                      discriminator_weight=discriminator_weight,
+                                      discriminator_num_filters=discriminator_num_filters,
+                                      discriminator_num_layers=discriminator_num_layers)
+
+    # Create the composer model
+    composer_model = ComposerTransformerAutoEncoder(model=transformer,
+                                                    autoencoder_loss=loss,
+                                                    input_key=input_key,
+                                                    patch_size=patch_size)
+    return composer_model
 
 
 def build_autoencoder(input_channels: int = 3,
