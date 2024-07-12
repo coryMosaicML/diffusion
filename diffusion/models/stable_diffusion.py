@@ -251,6 +251,7 @@ class StableDiffusion(ComposerModel):
             added_cond_kwargs = {'text_embeds': text_pooled_embeds, 'time_ids': add_time_ids}
 
         # Forward through the model
+        print('INPUT SHAPE:', noised_latents.shape)
         return self.unet(noised_latents,
                          timesteps,
                          text_embeds,
