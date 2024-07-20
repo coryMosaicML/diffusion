@@ -41,7 +41,7 @@ def get_multidimensional_position_embeddings(position_embeddings: torch.Tensor, 
     return sequenced_embeddings  # (B, S, F, D)
 
 
-class MuLinear(nn.Module):
+class MuLinear(nn.Linear):
     """Linear layer with mu-parameterization.
 
     Args:
@@ -50,26 +50,20 @@ class MuLinear(nn.Module):
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.linear = nn.Linear(in_features, out_features, bias=bias)
-        self.mu_param_init(self.linear)
+        super().__init__(in_features, out_features, bias=bias)
+        self.mu_param_init()
 
-    def mu_param_init(self, module: nn.Linear) -> None:
+    def mu_param_init(self) -> None:
         """Initialize a linear layer  according to the mu-parameterization.
 
         Args:
             module (nn.Linear): The linear layer to initialize.
         """
-        n_out, n_in = module.weight.shape
+        n_out, n_in = self.weight.shape
         scale = 1 / math.sqrt(n_in) * min(1, math.sqrt(n_out / n_in))
-        nn.init.normal_(module.weight, mean=0, std=scale)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
+        nn.init.normal_(self.weight, mean=0, std=scale)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -86,7 +80,7 @@ class AdaptiveLayerNorm(nn.Module):
         self.num_features = num_features
         # MLP for computing modulations.
         # Initialized to zero so modulation acts as identity at initialization.
-        self.adaLN_mlp_linear = nn.Linear(self.num_features, 2 * self.num_features, bias=True)
+        self.adaLN_mlp_linear = MuLinear(self.num_features, 2 * self.num_features, bias=True)
         nn.init.zeros_(self.adaLN_mlp_linear.weight)
         nn.init.zeros_(self.adaLN_mlp_linear.bias)
         self.adaLN_mlp = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear)
@@ -114,7 +108,7 @@ class ModulationLayer(nn.Module):
         self.num_features = num_features
         # MLP for computing modulation.
         # Initialized to zero so modulation starts off at zero.
-        self.adaLN_mlp_linear = nn.Linear(self.num_features, self.num_features, bias=True)
+        self.adaLN_mlp_linear = MuLinear(self.num_features, self.num_features, bias=True)
         nn.init.zeros_(self.adaLN_mlp_linear.weight)
         nn.init.zeros_(self.adaLN_mlp_linear.bias)
         self.adaLN_mlp = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear)
