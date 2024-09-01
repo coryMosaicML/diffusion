@@ -283,6 +283,7 @@ def stable_diffusion_xl(
     autoencoder_path: Optional[str] = None,
     autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
     prediction_type: str = 'epsilon',
+    use_multiscale_loss: bool = False,
     latent_mean: Union[float, Tuple, str] = 0.0,
     latent_std: Union[float, Tuple, str] = 7.67754318618,
     beta_schedule: str = 'scaled_linear',
@@ -329,6 +330,7 @@ def stable_diffusion_xl(
         autoencoder_local_path (optional, str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
         prediction_type (str): The type of prediction to use. Must be one of 'sample',
             'epsilon', or 'v_prediction'. Default: `epsilon`.
+        use_multiscale_loss (bool): Whether to use multiscale loss. Default: `False`.
         latent_mean (float, Tuple, str): The mean of the autoencoder latents. Either a float for a single value,
             a tuple of means, or or `'latent_statistics'` to try to use the value from the autoencoder
             checkpoint. Defaults to `0.0`.
@@ -513,6 +515,7 @@ def stable_diffusion_xl(
         noise_scheduler=noise_scheduler,
         inference_noise_scheduler=inference_noise_scheduler,
         prediction_type=prediction_type,
+        use_multiscale_loss=use_multiscale_loss,
         latent_mean=latent_mean,
         latent_std=latent_std,
         downsample_factor=downsample_factor,

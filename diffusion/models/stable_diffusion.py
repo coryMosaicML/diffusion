@@ -42,6 +42,7 @@ class StableDiffusion(ComposerModel):
         loss_fn (torch.nn.Module): torch loss function. Default: `F.mse_loss`.
         prediction_type (str): The type of prediction to use. Must be one of 'sample',
             'epsilon', or 'v_prediction'. Default: `epsilon`.
+        use_multiscale_loss (bool): Whether to use multiscale loss. Default: `False`.
         latent_mean (Optional[tuple[float]]): The means of the latent space. If not specified, defaults to
             4 * (0.0,). Default: `None`.
         latent_std (Optional[tuple[float]]): The standard deviations of the latent space. If not specified,
@@ -85,6 +86,7 @@ class StableDiffusion(ComposerModel):
                  inference_noise_scheduler,
                  loss_fn=F.mse_loss,
                  prediction_type: str = 'epsilon',
+                 use_multiscale_loss: bool = False,
                  latent_mean: Optional[Tuple[float]] = None,
                  latent_std: Optional[Tuple[float]] = None,
                  downsample_factor: int = 8,
@@ -111,6 +113,7 @@ class StableDiffusion(ComposerModel):
         self.prediction_type = prediction_type.lower()
         if self.prediction_type not in ['sample', 'epsilon', 'v_prediction']:
             raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
+        self.use_multiscale_loss = use_multiscale_loss
         self.downsample_factor = downsample_factor
         self.offset_noise = offset_noise
         self.quasirandomness = quasirandomness
@@ -259,7 +262,22 @@ class StableDiffusion(ComposerModel):
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
-        return self.loss_fn(outputs[0], outputs[1])
+        if self.use_multiscale_loss:
+            downsample_factors = [1, 2, 4]
+            weights = [1024, 512, 256]
+            pred = outputs[0]
+            target = outputs[1]
+            loss = 0
+            for i, factor in enumerate(downsample_factors):
+                pred_downsampled = F.interpolate(pred, scale_factor=1 / factor, mode='bilinear', align_corners=False)
+                target_downsampled = F.interpolate(target,
+                                                   scale_factor=1 / factor,
+                                                   mode='bilinear',
+                                                   align_corners=False)
+                loss += F.mse_loss(pred_downsampled, target_downsampled) / weights[i]
+            return loss
+        else:
+            return self.loss_fn(outputs[0], outputs[1])
 
     def eval_forward(self, batch, outputs=None):
         """For stable diffusion, eval forward computes unet outputs as well as some samples."""
