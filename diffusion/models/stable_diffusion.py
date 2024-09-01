@@ -264,7 +264,7 @@ class StableDiffusion(ComposerModel):
         """Loss between unet output and added noise, typically mse."""
         if self.use_multiscale_loss:
             downsample_factors = [1, 2, 4]
-            weights = [1024, 512, 256]
+            weights = [4, 2, 1]
             pred = outputs[0]
             target = outputs[1]
             loss = 0
