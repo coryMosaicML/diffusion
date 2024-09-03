@@ -267,7 +267,7 @@ class DiffusionV1(ComposerModel):
 
         # Encode the images with the autoencoder encoder
         inputs = batch['image']
-        latents = self.encode_images(inputs, dtype=text_embeds.dtype)
+        latents = self.encode_images(inputs)
 
         # Sample the diffusion timesteps
         timesteps = self._generate_timesteps(latents)
