@@ -259,10 +259,10 @@ class DiffusionV1(ComposerModel):
 
         cem = (clip_embed.mean().item(), clip_embed.std().item())
         pem = (text_pooled_embeds.mean().item(), text_pooled_embeds.std().item())
-        cms = clip_mask.sum().item()
+        cms = clip_mask.sum(dim=1).min().item()
         print('CLIP: ', cem, pem, cms)
         tem = (t5_embed.mean().item(), t5_embed.std().item())
-        tms = t5_mask.sum().item()
+        tms = t5_mask.sum(dim=1).min().item()
         print('T5: ', tem, tms)
 
         # Encode the images with the autoencoder encoder
