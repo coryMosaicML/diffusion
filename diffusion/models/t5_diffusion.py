@@ -289,6 +289,7 @@ class DiffusionV1(ComposerModel):
         """Loss between unet output and added noise, typically mse."""
         print('outputs: ', outputs[0].mean().item(), outputs[0].std().item())
         loss = F.mse_loss(outputs[0], outputs[1])
+        print('loss: ', loss.item())
         return loss
 
     def eval_forward(self, batch, outputs=None):
