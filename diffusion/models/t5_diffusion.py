@@ -255,19 +255,23 @@ class DiffusionV1(ComposerModel):
         clip_embed = batch['CLIP_LATENTS']
         clip_mask = batch['CLIP_ATTENTION_MASK']
         text_pooled_embeds = batch['CLIP_POOLED']
+        # Send the text embeddings to fp16
+        t5_embed = t5_embed.half()
+        clip_embed = clip_embed.half()
+        text_pooled_embeds = text_pooled_embeds.half()
         text_embeds, encoder_attention_mask = self.prepare_text_embeddings(t5_embed, clip_embed, t5_mask, clip_mask)
 
         cem = (clip_embed.mean().item(), clip_embed.std().item())
         pem = (text_pooled_embeds.mean().item(), text_pooled_embeds.std().item())
         cms = clip_mask.sum(dim=1).max().item()
-        print('CLIP: ', cem, pem, cms)
+        print('CLIP: ', cem, pem, cms, clip_mask.dtype)
         tem = (t5_embed.mean().item(), t5_embed.std().item())
         tms = t5_mask.sum(dim=1).max().item()
-        print('T5: ', tem, tms)
+        print('T5: ', tem, tms, t5_mask.dtype)
 
         # Encode the images with the autoencoder encoder
         inputs = batch['image']
-        latents = self.encode_images(inputs)
+        latents = self.encode_images(inputs, dtype=torch.float16)
 
         # Sample the diffusion timesteps
         timesteps = self._generate_timesteps(latents)
