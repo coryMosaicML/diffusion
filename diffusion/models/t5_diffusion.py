@@ -249,10 +249,6 @@ class DiffusionV1(ComposerModel):
     def forward(self, batch):
         latents, text_embeds, text_pooled_embeds, encoder_attention_mask = None, None, None, None
 
-        # Encode the images with the autoencoder encoder
-        inputs = batch['image']
-        latents = self.encode_images(inputs)
-
         # Text embeddings are shape (B, seq_len, emb_dim), optionally truncate to a max length
         t5_embed = batch['T5_LATENTS']
         t5_mask = batch['T5_ATTENTION_MASK']
@@ -260,6 +256,18 @@ class DiffusionV1(ComposerModel):
         clip_mask = batch['CLIP_ATTENTION_MASK']
         text_pooled_embeds = batch['CLIP_POOLED']
         text_embeds, encoder_attention_mask = self.prepare_text_embeddings(t5_embed, clip_embed, t5_mask, clip_mask)
+
+        cem = (clip_embed.mean().item(), clip_embed.std().item())
+        pem = (text_pooled_embeds.mean().item(), text_pooled_embeds.std().item())
+        cms = clip_mask.sum().item()
+        print('CLIP: ', cem, pem, cms)
+        tem = (t5_embed.mean().item(), t5_embed.std().item())
+        tms = t5_mask.sum().item()
+        print('T5: ', tem, tms)
+
+        # Encode the images with the autoencoder encoder
+        inputs = batch['image']
+        latents = self.encode_images(inputs, dtype=self.text_embeds.dtype)
 
         # Sample the diffusion timesteps
         timesteps = self._generate_timesteps(latents)
@@ -279,6 +287,7 @@ class DiffusionV1(ComposerModel):
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
+        print('outputs: ', outputs[0].mean().item(), outputs[0].std().item())
         loss = F.mse_loss(outputs[0], outputs[1])
         return loss
 
