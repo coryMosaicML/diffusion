@@ -111,7 +111,7 @@ class DiffusionV1(ComposerModel):
         self.inference_scheduler = inference_noise_scheduler
         # freeze VAE during diffusion training
         self.vae.requires_grad_(False)
-        self.vae = self.vae.bfloat16()
+        self.vae = self.vae.half()
         if fsdp:
             # only wrap models we are training
             self.vae._fsdp_wrap = False
