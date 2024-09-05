@@ -264,10 +264,10 @@ class DiffusionV1(ComposerModel):
         cem = (clip_embed.mean().item(), clip_embed.std().item())
         pem = (text_pooled_embeds.mean().item(), text_pooled_embeds.std().item())
         cms = clip_mask.sum(dim=1).max().item()
-        print('CLIP: ', cem, pem, cms, clip_mask.dtype)
+        #print('CLIP: ', cem, pem, cms, clip_mask.dtype)
         tem = (t5_embed.mean().item(), t5_embed.std().item())
         tms = t5_mask.sum(dim=1).max().item()
-        print('T5: ', tem, tms, t5_mask.dtype)
+        #print('T5: ', tem, tms, t5_mask.dtype)
 
         # Encode the images with the autoencoder encoder
         inputs = batch['image']
@@ -291,9 +291,9 @@ class DiffusionV1(ComposerModel):
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
-        print('outputs: ', outputs[0].mean().item(), outputs[0].std().item())
+        #print('outputs: ', outputs[0].mean().item(), outputs[0].std().item())
         loss = F.mse_loss(outputs[0], outputs[1])
-        print('loss: ', loss.item())
+        #print('loss: ', loss.item())
         return loss
 
     def eval_forward(self, batch, outputs=None):

@@ -141,14 +141,25 @@ class StreamingImageCaptionLatentsDataset(StreamingDataset):
                     clip_pooled = np.frombuffer(sample[f'{caption_key}_CLIP_POOLED_TEXT'], dtype=np.float32).copy()
                     out['CLIP_POOLED'] = torch.from_numpy(clip_pooled).to(self.latent_dtype).reshape(latent_shape[1])
         # Zero out any embeddings that are NaN
+        nan = False
         if out['CLIP_POOLED'].isnan().any():
+            print('CLIP_POOLED is NaN')
             out['CLIP_POOLED'] = torch.zeros_like(out['CLIP_POOLED'])
+            nan = True
         if out['T5_LATENTS'].isnan().any():
+            print('T5_LATENTS is NaN')
             out['T5_LATENTS'] = torch.zeros_like(out['T5_LATENTS'])
             out['T5_ATTENTION_MASK'] = torch.zeros_like(out['T5_ATTENTION_MASK'])
+            nan = True
         if out['CLIP_LATENTS'].isnan().any():
+            print('CLIP_LATENTS is NaN')
             out['CLIP_LATENTS'] = torch.zeros_like(out['CLIP_LATENTS'])
             out['CLIP_ATTENTION_MASK'] = torch.zeros_like(out['CLIP_ATTENTION_MASK'])
+            nan = True
+        if nan:
+            print(
+                f'NaN in index {index}, with AR bucket {sample["ASPECT_RATIO_BUCKET"]} and engagement {sample["SCORE_BIN"]}'
+            )
         return out
 
 
