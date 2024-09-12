@@ -19,7 +19,7 @@ from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, Composer
 from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttnProcessor, zero_module
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
-from diffusion.models.t2i_transformer import ComposerTextToImageMMDiT
+from diffusion.models.t2i_transformer import ComposerTextToImageMMDiT, ComposerTextToImagePixelMMDiT
 from diffusion.models.text_encoder import MultiTextEncoder, MultiTokenizer
 from diffusion.models.transformer import DiffusionTransformer
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
@@ -703,6 +703,94 @@ def text_to_image_transformer(
                                      image_key=image_key,
                                      caption_key=caption_key,
                                      caption_mask_key=caption_mask_key)
+
+    if torch.cuda.is_available():
+        model = DeviceGPU().module_to_device(model)
+    return model
+
+
+def text_to_image_pixel_transformer(
+    tokenizer_names: Union[str, Tuple[str, ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/tokenizer'),
+    text_encoder_names: Union[str, Tuple[str, ...]] = ('stabilityai/stable-diffusion-xl-base-1.0/text_encoder'),
+    num_layers: int = 28,
+    max_image_side: int = 1280,
+    conditioning_features: int = 768,
+    conditioning_max_sequence_length: int = 77,
+    patch_size: int = 16,
+    image_mean: Union[float, Tuple] = 0.0,
+    image_std: Union[float, Tuple] = 1.0,
+    timestep_mean: float = 0.0,
+    timestep_std: float = 1.0,
+    timestep_shift: float = 1.0,
+    image_key: str = 'image',
+    caption_key: str = 'captions',
+    caption_mask_key: str = 'attention_mask',
+    pretrained: bool = False,
+):
+    """Text to image transformer training setup.
+
+    Args:
+        tokenizer_names (str, Tuple[str, ...]): HuggingFace name(s) of the tokenizer(s) to load.
+            Default: ``('stabilityai/stable-diffusion-xl-base-1.0/tokenizer')``.
+        text_encoder_names (str, Tuple[str, ...]): HuggingFace name(s) of the text encoder(s) to load.
+            Default: ``('stabilityai/stable-diffusion-xl-base-1.0/text_encoder')``.
+        num_layers (int): Number of layers in the transformer. Number of heads and layer width are determined by
+            this according to `num_features = 64 * num_layers`, and `num_heads = num_layers`. Default: `28`.
+        max_image_side (int): Maximum side length of the image. Default: `1280`.
+        conditioning_features (int): Number of features in the conditioning transformer. Default: `768`.
+        conditioning_max_sequence_length (int): Maximum sequence length for the conditioning transformer. Default: `77`.
+        patch_size (int): Patch size for the transformer. Default: `16`.
+        image_mean (float, Tuple): The mean of the images. Either a float for a single value. Defaults to `0.0`.
+        image_std (float, Tuple): The std. dev. of the images. Either a float for a single value. Defaults to `1.0`.
+        timestep_mean (float): The mean of the timesteps. Default: `0.0`.
+        timestep_std (float): The std. dev. of the timesteps. Default: `1.0`.
+        timestep_shift (float): The shift of the timesteps. Default: `1.0`.
+        image_key (str): The key for the image in the batch. Default: `image`.
+        caption_key (str): The key for the captions in the batch. Default: `captions`.
+        caption_mask_key (str): The key for the caption mask in the batch. Default: `attention_mask`.
+        pretrained (bool): Whether to load pretrained weights. Not used. Defaults to False.
+    """
+    if (isinstance(tokenizer_names, tuple) or
+            isinstance(text_encoder_names, tuple)) and len(tokenizer_names) != len(text_encoder_names):
+        raise ValueError('Number of tokenizer_names and text_encoder_names must be equal')
+
+    # Make the tokenizer and text encoder
+    tokenizer = MultiTokenizer(tokenizer_names_or_paths=tokenizer_names)
+    text_encoder = MultiTextEncoder(model_names=text_encoder_names, encode_latents_in_fp16=True, pretrained_sdxl=False)
+
+    if isinstance(image_mean, float):
+        image_mean = (image_mean,) * 3
+    if isinstance(image_std, float):
+        image_std = (image_std,) * 3
+    assert isinstance(image_mean, tuple) and isinstance(image_std, tuple)
+    # Figure out the maximum input sequence length
+    input_max_sequence_length = math.ceil(max_image_side / (patch_size))
+
+    # Make the transformer model
+    transformer = DiffusionTransformer(num_features=64 * num_layers,
+                                       num_heads=num_layers,
+                                       num_layers=num_layers,
+                                       input_features=3 * (patch_size**2),
+                                       input_max_sequence_length=input_max_sequence_length,
+                                       input_dimension=2,
+                                       conditioning_features=conditioning_features,
+                                       conditioning_max_sequence_length=conditioning_max_sequence_length,
+                                       conditioning_dimension=1,
+                                       expansion_factor=4)
+    # Make the composer model
+    model = ComposerTextToImagePixelMMDiT(model=transformer,
+                                          text_encoder=text_encoder,
+                                          tokenizer=tokenizer,
+                                          num_channels=3,
+                                          image_mean=image_mean,
+                                          image_std=image_std,
+                                          patch_size=patch_size,
+                                          timestep_mean=timestep_mean,
+                                          timestep_std=timestep_std,
+                                          timestep_shift=timestep_shift,
+                                          image_key=image_key,
+                                          caption_key=caption_key,
+                                          caption_mask_key=caption_mask_key)
 
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)
