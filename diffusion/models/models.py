@@ -762,7 +762,6 @@ def text_to_image_pixel_transformer(
         image_mean = (image_mean,) * 3
     if isinstance(image_std, float):
         image_std = (image_std,) * 3
-    assert isinstance(image_mean, tuple) and isinstance(image_std, tuple)
     # Figure out the maximum input sequence length
     input_max_sequence_length = math.ceil(max_image_side / (patch_size))
 
