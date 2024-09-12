@@ -12,7 +12,7 @@ from composer.devices import DeviceGPU
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
 from peft import LoraConfig
 from torchmetrics import MeanSquaredError
-from transformers import CLIPTextModel, CLIPTokenizer, PretrainedConfig
+from transformers import AutoTokenizer, CLIPTextModel, CLIPTokenizer, PretrainedConfig
 
 from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, ComposerAutoEncoder,
                                           ComposerDiffusersAutoEncoder, load_autoencoder)
@@ -755,9 +755,15 @@ def text_to_image_pixel_transformer(
         raise ValueError('Number of tokenizer_names and text_encoder_names must be equal')
 
     # Make the tokenizer and text encoder
-    tokenizer = MultiTokenizer(tokenizer_names_or_paths=tokenizer_names)
-    text_encoder = MultiTextEncoder(model_names=text_encoder_names, encode_latents_in_fp16=True, pretrained_sdxl=False)
-
+    tokenizer = AutoTokenizer.from_pretrained('stabilityai/stable-diffusion-xl-base-1.0',
+                                              subfolder='tokenizer',
+                                              cache_dir='/tmp/hf_files',
+                                              local_files_only=False)
+    text_encoder = CLIPTextModel.from_pretrained('stabilityai/stable-diffusion-xl-base-1.0',
+                                                 subfolder='text_encoder',
+                                                 torch_dtype=torch.float16,
+                                                 cache_dir='/tmp/hf_files',
+                                                 local_files_only=False).cuda().eval()
     if isinstance(image_mean, float):
         image_mean = (image_mean,) * 3
     if isinstance(image_std, float):
