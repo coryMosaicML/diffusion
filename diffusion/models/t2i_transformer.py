@@ -659,6 +659,7 @@ class ComposerPrecomputedTextToImageMMDiT(ComposerModel):
         clip_embed = batch['CLIP_LATENTS']
         clip_mask = batch['CLIP_ATTENTION_MASK']
         text_pooled_embeddings = batch['CLIP_POOLED']
+        text_pooled_embeddings = self.pooled_embedding_mlp(text_pooled_embeddings)
         text_embeddings, text_mask = self.prepare_text_embeddings(t5_embed, clip_embed, t5_mask, clip_mask)
         text_embeddings_coords = self.make_text_embeddings_coords(text_embeddings)
         # Diffusion forward process
@@ -808,6 +809,8 @@ class ComposerPrecomputedTextToImageMMDiT(ComposerModel):
         pooled_embedding = torch.cat([pooled_embedding, pooled_neg_embedding], dim=0)
         latent_coords_input = torch.cat([latent_coords, latent_coords], dim=0)
 
+        pooled_embedding = self.pooled_embedding_mlp(pooled_embedding)
+        
         # backward diffusion process
         timesteps, delta_t = self.make_sampling_timesteps(num_inference_steps)
         timesteps, delta_t = timesteps.to(device), delta_t.to(device)
