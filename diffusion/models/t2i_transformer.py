@@ -474,6 +474,7 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         image_std (Optional[tuple[float]]): The standard deviations of the images. If not specified,
             defaults to 3 * (1,). Default: `None`.
         patch_size (int): The size of the patches in the images. Default: `16`.
+        patch_drop_fraction (float): The fraction of patches to drop. Default: `0.0`.
         timestep_mean (float): The mean of the logit-normal distribution for sampling timesteps. Default: `0.0`.
         timestep_std (float): The standard deviation of the logit-normal distribution for sampling timesteps.
             Default: `1.0`.
@@ -494,6 +495,7 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         image_mean: Optional[tuple[float]] = None,
         image_std: Optional[tuple[float]] = None,
         patch_size: int = 16,
+        patch_drop_fraction: float = 0.0,
         timestep_mean: float = 0.0,
         timestep_std: float = 1.0,
         timestep_shift: float = 1.0,
@@ -514,6 +516,7 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         self.image_mean = torch.tensor(image_mean).view(1, -1, 1, 1)
         self.image_std = torch.tensor(image_std).view(1, -1, 1, 1)
         self.patch_size = patch_size
+        self.patch_drop_fraction = patch_drop_fraction
         self.timestep_mean = timestep_mean
         self.timestep_std = timestep_std
         self.timestep_shift = timestep_shift
@@ -569,6 +572,7 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         batch_size = batch[self.image_key].shape[0]
         height, width = batch[self.image_key].shape[2:]
         input_seq_len = height * width / (self.patch_size**2)
+        input_seq_len *= 1 - self.patch_drop_fraction  # Account for dropped patches
         cond_seq_len = batch[self.caption_key].shape[1]
         seq_len = input_seq_len + cond_seq_len
         # Calulate forward flops on full sequence excluding attention
@@ -651,6 +655,18 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         pooled_text_embeddings = self.pooled_embedding_mlp(pooled_text_embeddings)
         return text_embeddings, text_embeddings_coords, text_mask, pooled_text_embeddings
 
+    def drop_patches(self, patches: torch.Tensor, coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.patch_drop_fraction == 0.0:
+            # Short circuit if no patches are dropped
+            return patches, coords
+        # Drop patches
+        B, T = patches.shape[:2]
+        num_kept_patches = int((1 - self.patch_drop_fraction) * T)
+        keep_indices = [torch.randperm(T)[:num_kept_patches] for _ in range(B)]
+        kept_patches = torch.stack([patches[i, keep_indices[i]] for i in range(B)])
+        kept_coords = torch.stack([coords[i, keep_indices[i]] for i in range(B)])
+        return kept_patches, kept_coords
+
     def diffusion_forward_process(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Diffusion forward process using a rectified flow."""
         if not self.model.training:
@@ -684,6 +700,8 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
             caption, caption_mask)
         # Diffusion forward process
         noised_inputs, targets, timesteps = self.diffusion_forward_process(image_patches)
+        # Drop some fraction of patches
+        noised_inputs, image_coords = self.drop_patches(noised_inputs, image_coords)
         # Forward through the model
         model_out = self.model(noised_inputs,
                                image_coords,

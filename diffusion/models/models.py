@@ -717,6 +717,7 @@ def text_to_image_pixel_transformer(
     conditioning_features: int = 768,
     conditioning_max_sequence_length: int = 77,
     patch_size: int = 16,
+    patch_drop_fraction: float = 0.0,
     image_mean: Union[float, Tuple] = 0.0,
     image_std: Union[float, Tuple] = 1.0,
     timestep_mean: float = 0.0,
@@ -740,6 +741,7 @@ def text_to_image_pixel_transformer(
         conditioning_features (int): Number of features in the conditioning transformer. Default: `768`.
         conditioning_max_sequence_length (int): Maximum sequence length for the conditioning transformer. Default: `77`.
         patch_size (int): Patch size for the transformer. Default: `16`.
+        patch_drop_fraction (float): Fraction of patches to drop. Default: `0.0`.
         image_mean (float, Tuple): The mean of the images. Either a float for a single value. Defaults to `0.0`.
         image_std (float, Tuple): The std. dev. of the images. Either a float for a single value. Defaults to `1.0`.
         timestep_mean (float): The mean of the timesteps. Default: `0.0`.
@@ -790,6 +792,7 @@ def text_to_image_pixel_transformer(
                                           image_mean=image_mean,
                                           image_std=image_std,
                                           patch_size=patch_size,
+                                          patch_drop_fraction=patch_drop_fraction,
                                           timestep_mean=timestep_mean,
                                           timestep_std=timestep_std,
                                           timestep_shift=timestep_shift,
