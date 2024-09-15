@@ -655,17 +655,19 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         pooled_text_embeddings = self.pooled_embedding_mlp(pooled_text_embeddings)
         return text_embeddings, text_embeddings_coords, text_mask, pooled_text_embeddings
 
-    def drop_patches(self, patches: torch.Tensor, coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def drop_patches(self, patches: torch.Tensor, coords: torch.Tensor,
+                     targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.patch_drop_fraction == 0.0:
             # Short circuit if no patches are dropped
-            return patches, coords
+            return patches, coords, targets
         # Drop patches
         B, T = patches.shape[:2]
         num_kept_patches = int((1 - self.patch_drop_fraction) * T)
         keep_indices = [torch.randperm(T)[:num_kept_patches] for _ in range(B)]
         kept_patches = torch.stack([patches[i, keep_indices[i]] for i in range(B)])
         kept_coords = torch.stack([coords[i, keep_indices[i]] for i in range(B)])
-        return kept_patches, kept_coords
+        kept_targets = torch.stack([targets[i, keep_indices[i]] for i in range(B)])
+        return kept_patches, kept_coords, kept_targets
 
     def diffusion_forward_process(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Diffusion forward process using a rectified flow."""
@@ -701,7 +703,7 @@ class ComposerTextToImagePixelMMDiT(ComposerModel):
         # Diffusion forward process
         noised_inputs, targets, timesteps = self.diffusion_forward_process(image_patches)
         # Drop some fraction of patches
-        noised_inputs, image_coords = self.drop_patches(noised_inputs, image_coords)
+        noised_inputs, image_coords, targets = self.drop_patches(noised_inputs, image_coords, targets)
         # Forward through the model
         model_out = self.model(noised_inputs,
                                image_coords,
