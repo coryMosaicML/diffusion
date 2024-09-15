@@ -457,3 +457,385 @@ class ComposerTextToImageMMDiT(ComposerModel):
         # Decode the latents
         image = self.decode_image(latent_patches, latent_coords)
         return image.detach()  # (batch*num_images_per_prompt, channel, h, w)
+
+
+class ComposerPrecomputedTextToImageMMDiT(ComposerModel):
+    """ComposerModel for text to image with a diffusion transformer with precomputed text embeddings.
+
+    Args:
+        model (DiffusionTransformer): Core diffusion model.
+        autoencoder (torch.nn.Module): HuggingFace or compatible vae.
+            must support `.encode()` and `decode()` functions.
+        latent_mean (Optional[tuple[float]]): The means of the latent space. If not specified, defaults to
+            4 * (0.0,). Default: `None`.
+        latent_std (Optional[tuple[float]]): The standard deviations of the latent space. If not specified,
+            defaults to 4 * (1/0.13025,). Default: `None`.
+        patch_size (int): The size of the patches in the image latents. Default: `2`.
+        downsample_factor (int): The factor by which the image is downsampled by the autoencoder. Default `8`.
+        latent_channels (int): The number of channels in the autoencoder latent space. Default: `4`.
+        timestep_mean (float): The mean of the logit-normal distribution for sampling timesteps. Default: `0.0`.
+        timestep_std (float): The standard deviation of the logit-normal distribution for sampling timesteps.
+            Default: `1.0`.
+        timestep_shift (float): The shift parameter for the logit-normal distribution for sampling timesteps.
+            A value of `1.0` is no shift. Default: `1.0`.
+        image_key (str): The name of the images in the dataloader batch. Default: `image`.
+        pooled_embedding_features (int): The number of features in the pooled text embeddings. Default: `768`.
+    """
+
+    def __init__(
+        self,
+        model: DiffusionTransformer,
+        autoencoder: torch.nn.Module,
+        latent_mean: Optional[tuple[float]] = None,
+        latent_std: Optional[tuple[float]] = None,
+        patch_size: int = 2,
+        downsample_factor: int = 8,
+        latent_channels: int = 4,
+        timestep_mean: float = 0.0,
+        timestep_std: float = 1.0,
+        timestep_shift: float = 1.0,
+        image_key: str = 'image',
+        pooled_embedding_features: int = 768,
+    ):
+        super().__init__()
+        self.model = model
+        self.autoencoder = autoencoder
+        if latent_mean is None:
+            self.latent_mean = 4 * (0.0)
+        if latent_std is None:
+            self.latent_std = 4 * (1 / 0.18215,)
+        self.latent_mean = torch.tensor(latent_mean).view(1, -1, 1, 1)
+        self.latent_std = torch.tensor(latent_std).view(1, -1, 1, 1)
+        self.patch_size = patch_size
+        self.downsample_factor = downsample_factor
+        self.latent_channels = latent_channels
+        self.timestep_mean = timestep_mean
+        self.timestep_std = timestep_std
+        self.timestep_shift = timestep_shift
+        self.image_key = image_key
+        self.pooled_embedding_features = pooled_embedding_features
+
+        # Embedding MLP for the pooled text embeddings
+        self.pooled_embedding_mlp = VectorEmbedding(pooled_embedding_features, model.num_features)
+        # Embedding MLPs for the multiple text encoders
+        self.t5_layernorm = torch.nn.LayerNorm(4096)
+        self.t5_embedding_mlp = VectorEmbedding(4096, model.num_features)
+        self.clip_layernorm = torch.nn.LayerNorm(pooled_embedding_features)
+        self.clip_embedding_mlp = VectorEmbedding(pooled_embedding_features, model.num_features)
+        # freeze text_encoder during diffusion training and use half precision
+        self.autoencoder.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
+        self.autoencoder = self.autoencoder.half()
+        self.text_encoder = self.text_encoder.half()
+
+        # Only FSDP wrap models we are training
+        self.model._fsdp_wrap = True
+        self.autoencoder._fsdp_wrap = False
+        self.text_encoder._fsdp_wrap = True
+
+        # Param counts relevant for MFU computation
+        # First calc the AdaLN params separately
+        self.adaLN_params = sum(p.numel() for n, p in self.model.named_parameters() if 'adaLN_mlp_linear' in n)
+        # For MFU calc we must be careful to prevent double counting of MMDiT flops.
+        # Here, count the number of params applied to each sequence element.
+        # Last block must be handled differently since post attn layers don't run on conditioning sequence
+        self.n_seq_params_per_block = self.model.num_features**2 * (4 + 2 * self.model.expansion_factor)
+        self.n_seq_params = self.n_seq_params_per_block * (self.model.num_layers - 1)
+        self.n_seq_params += 3 * (self.model.num_features**2)
+        self.n_last_layer_params = self.model.num_features**2 * (1 + 2 * self.model.expansion_factor)
+        # Params only on the input sequence
+        self.n_input_params = self.model.input_features * self.model.num_features
+        # Params only on the conditioning sequence
+        self.n_cond_params = self.model.conditioning_features * self.model.num_features
+
+        # Set up metrics
+        self.train_metrics = [MeanSquaredError()]
+        self.val_metrics = [MeanSquaredError()]
+
+        # Optional rng generator
+        self.rng_generator: Optional[torch.Generator] = None
+
+    def _apply(self, fn):
+        super(ComposerPrecomputedTextToImageMMDiT, self)._apply(fn)
+        self.latent_mean = fn(self.latent_mean)
+        self.latent_std = fn(self.latent_std)
+        return self
+
+    def set_rng_generator(self, rng_generator: torch.Generator):
+        """Sets the rng generator for the model."""
+        self.rng_generator = rng_generator
+
+    def flops_per_batch(self, batch) -> int:
+        batch_size = batch[self.image_key].shape[0]
+        height, width = batch[self.image_key].shape[2:]
+        input_seq_len = height * width / (self.patch_size**2 * self.downsample_factor**2)
+        cond_seq_len = batch[self.caption_key].shape[1]
+        seq_len = input_seq_len + cond_seq_len
+        # Calulate forward flops on full sequence excluding attention
+        param_flops = 2 * self.n_seq_params * batch_size * seq_len
+        # Last block contributes a bit less than other blocks
+        param_flops += 2 * self.n_last_layer_params * batch_size * input_seq_len
+        # Include input sequence params (comparatively small)
+        param_flops += 2 * self.n_input_params * batch_size * input_seq_len
+        # Include conditioning sequence params (comparatively small)
+        param_flops += 2 * self.n_cond_params * batch_size * cond_seq_len
+        # Include flops from adaln
+        param_flops += 2 * self.adaLN_params * batch_size
+        # Calculate flops for attention layers
+        attention_flops = 4 * self.model.num_layers * seq_len**2 * self.model.num_features * batch_size
+        return 3 * param_flops + 3 * attention_flops
+
+    def encode_image(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode an image tensor with the autoencoder and patchify the latents."""
+        with torch.cuda.amp.autocast(enabled=False):
+            latents = self.autoencoder.encode(image.half())['latent_dist'].sample().data
+        # Scale and patchify the latents
+        latents = (latents - self.latent_mean) / self.latent_std
+        latent_patches, latent_coords = patchify(latents, self.patch_size)
+        return latent_patches, latent_coords
+
+    @torch.no_grad()
+    def decode_image(self, latent_patches: torch.Tensor, latent_coords: torch.Tensor) -> torch.Tensor:
+        """Decode image latent patches and unpatchify the image."""
+        # Unpatchify the latents
+        latents = [
+            unpatchify(latent_patches[i], latent_coords[i], self.patch_size) for i in range(latent_patches.shape[0])
+        ]
+        latents = torch.stack(latents)
+        # Scale the latents back to the original scale
+        latents = latents * self.latent_std + self.latent_mean
+        # Decode the latents
+        with torch.cuda.amp.autocast(enabled=False):
+            image = self.autoencoder.decode(latents.half()).sample
+        image = (image / 2 + 0.5).clamp(0, 1)
+        return image
+
+    def make_text_embeddings_coords(self, text_embeddings: torch.Tensor) -> torch.Tensor:
+        """Make text embeddings coordinates for the transformer."""
+        text_embeddings_coords = torch.arange(text_embeddings.shape[1], device=text_embeddings.device)
+        text_embeddings_coords = text_embeddings_coords.unsqueeze(0).expand(text_embeddings.shape[0], -1)
+        text_embeddings_coords = text_embeddings_coords.unsqueeze(-1)
+        return text_embeddings_coords
+
+    def prepare_text_embeddings(self, t5_embed: torch.Tensor, clip_embed: torch.Tensor, t5_mask: torch.Tensor,
+                                clip_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Combine text embeddings from T5 and CLIP."""
+        t5_embed = self.t5_layernorm(t5_embed)
+        t5_embed = self.t5_embedding_mlp(t5_embed)
+        clip_embed = self.clip_layernorm(clip_embed)
+        clip_embed = self.clip_embedding_mlp(clip_embed)
+        text_embeddings = torch.cat([t5_embed, clip_embed], dim=1)
+        mask = torch.cat([t5_mask, clip_mask], dim=1)
+        return text_embeddings, mask
+
+    def diffusion_forward_process(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Diffusion forward process using a rectified flow."""
+        if not self.model.training:
+            # Sample equally spaced timesteps across all devices
+            global_batch_size = inputs.shape[0] * dist.get_world_size()
+            global_timesteps = torch.linspace(0, 1, global_batch_size)
+            # Get this device's subset of all the timesteps
+            idx_offset = dist.get_global_rank() * inputs.shape[0]
+            timesteps = global_timesteps[idx_offset:idx_offset + inputs.shape[0]].to(inputs.device)
+            timesteps = timesteps.view(-1, 1, 1)
+        else:
+            # Sample timesteps according to a logit-normal distribution
+            u = torch.randn(inputs.shape[0], device=inputs.device, generator=self.rng_generator, dtype=inputs.dtype)
+            u = self.timestep_mean + self.timestep_std * u
+            timesteps = torch.sigmoid(u).view(-1, 1, 1)
+            timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
+        # Then, add the noise to the latents according to the recitified flow
+        noise = torch.randn(*inputs.shape, device=inputs.device, generator=self.rng_generator)
+        noised_inputs = (1 - timesteps) * inputs + timesteps * noise
+        # Compute the targets, which are the velocities
+        targets = noise - inputs
+        return noised_inputs, targets, timesteps[:, 0, 0]
+
+    def forward(self, batch):
+        # Get the inputs
+        image = batch[self.image_key]
+        # Get the image latents
+        latent_patches, latent_coords = self.encode_image(image)
+        # Get the text embeddings and their coords
+        t5_embed = batch['T5_LATENTS']
+        t5_mask = batch['T5_ATTENTION_MASK']
+        clip_embed = batch['CLIP_LATENTS']
+        clip_mask = batch['CLIP_ATTENTION_MASK']
+        text_pooled_embeddings = batch['CLIP_POOLED']
+        text_embeddings, text_mask = self.prepare_text_embeddings(t5_embed, clip_embed, t5_mask, clip_mask)
+        text_embeddings_coords = self.make_text_embeddings_coords(text_embeddings)
+        # Diffusion forward process
+        noised_inputs, targets, timesteps = self.diffusion_forward_process(latent_patches)
+        # Forward through the model
+        model_out = self.model(noised_inputs,
+                               latent_coords,
+                               timesteps,
+                               conditioning=text_embeddings,
+                               conditioning_coords=text_embeddings_coords,
+                               input_mask=None,
+                               conditioning_mask=text_mask,
+                               constant_conditioning=text_pooled_embeddings)
+        return {'predictions': model_out, 'targets': targets, 'timesteps': timesteps}
+
+    def loss(self, outputs, batch):
+        """MSE loss between outputs and targets."""
+        loss = F.mse_loss(outputs['predictions'], outputs['targets'])
+        return loss
+
+    def eval_forward(self, batch, outputs=None):
+        # Skip this if outputs have already been computed, e.g. during training
+        if outputs is not None:
+            return outputs
+        return self.forward(batch)
+
+    def get_metrics(self, is_train: bool = False):
+        if is_train:
+            metrics_dict = {metric.__class__.__name__: metric for metric in self.train_metrics}
+        else:
+            metrics_dict = {metric.__class__.__name__: metric for metric in self.val_metrics}
+        return metrics_dict
+
+    def update_metric(self, batch, outputs, metric):
+        if isinstance(metric, MeanSquaredError):
+            metric.update(outputs['predictions'], outputs['targets'])
+        else:
+            raise ValueError(f'Unrecognized metric {metric.__class__.__name__}')
+
+    def make_sampling_timesteps(self, N: int):
+        timesteps = torch.linspace(1, 0, N + 1)
+        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
+        # Make timestep differences
+        delta_t = timesteps[:-1] - timesteps[1:]
+        return timesteps[:-1], delta_t
+
+    @torch.no_grad()
+    def generate(self,
+                 prompt: Optional[Union[str, list]] = None,
+                 negative_prompt: Optional[Union[str, list]] = None,
+                 prompt_embeds: Optional[torch.Tensor] = None,
+                 pooled_prompt: Optional[torch.Tensor] = None,
+                 prompt_mask: Optional[torch.Tensor] = None,
+                 neg_prompt_embeds: Optional[torch.Tensor] = None,
+                 pooled_neg_prompt: Optional[torch.Tensor] = None,
+                 neg_prompt_mask: Optional[torch.Tensor] = None,
+                 height: int = 256,
+                 width: int = 256,
+                 guidance_scale: float = 7.0,
+                 rescaled_guidance: Optional[float] = None,
+                 num_inference_steps: int = 50,
+                 num_images_per_prompt: int = 1,
+                 progress_bar: bool = True,
+                 seed: Optional[int] = None):
+        """Run generation for the model.
+
+        Args:
+            prompt (str, list): Prompt or prompts for the generation. Only use if not using embeddings.
+                Default: `None`.
+            negative_prompt (Optional[str, list]): Negative prompt or prompts for the generation. Only
+                use if not using embeddings. Default: `None`.
+            prompt_embeds (torch.Tensor): Optionally pass pre-tokenized prompts instead
+                of string prompts. Default: `None`.
+            pooled_prompt (torch.Tensor): Optionally pass a precomputed pooled prompt embedding
+                if using embeddings. Default: `None`.
+            prompt_mask (torch.Tensor): Optionally pass a precomputed attention mask for the
+                prompt embeddings. Default: `None`.
+            neg_prompt_embeds (torch.Tensor): Optionally pass pre-embedded negative
+                prompts instead of string negative prompts.  Default: `None`.
+            pooled_neg_prompt (torch.Tensor): Optionally pass a precomputed pooled negative
+                prompt embedding if using embeddings. Default: `None`.
+            neg_prompt_mask (torch.Tensor): Optionally pass a precomputed attention mask for the
+                negative prompt embeddings. Default: `None`.
+            height (int): Height of the generated images. Default: `256`.
+            width (int): Width of the generated images. Default: `256`.
+            guidance_scale (float): Scale for the guidance. Default: `7.0`.
+            rescaled_guidance (Optional[float]): Rescale the guidance. Default: `None`.
+            num_inference_steps (int): Number of inference steps. Default: `50`.
+            num_images_per_prompt (int): Number of images per prompt. Default: `1`.
+            progress_bar (bool): Whether to show a progress bar. Default: `True`.
+            seed (Optional[int]): Seed for the generation. Default: `None`.
+
+        Returns:
+            torch.Tensor: Generated images. Shape [batch*num_images_per_prompt, channel, h, w].
+        """
+        device = next(self.model.parameters()).device
+        # Create rng for the generation
+        rng_generator = torch.Generator(device=device)
+        if seed:
+            rng_generator = rng_generator.manual_seed(seed)
+
+        # Check that inputs are consistent with all embeddings or text inputs. All embeddings should be provided if using
+        # embeddings, and none if using text.
+        if (prompt_embeds is None) == (prompt is None):
+            raise ValueError('One and only one of prompt or prompt_embeds should be provided.')
+        if (pooled_prompt is None) != (prompt_embeds is None):
+            raise ValueError('pooled_prompt should be provided if and only if using embeddings')
+        if (prompt_mask is None) != (prompt_embeds is None):
+            raise ValueError('prompt_mask should be provided if and only if using embeddings')
+        if (neg_prompt_mask is None) != (neg_prompt_embeds is None):
+            raise ValueError('neg_prompt_mask should be provided if and only if using embeddings')
+        if (pooled_neg_prompt is None) != (neg_prompt_embeds is None):
+            raise ValueError('pooled_neg_prompt should be provided if and only if using embeddings')
+        assert prompt_embeds is not None, 'Prompt embeddings must be provided currently.'
+        assert pooled_prompt is not None, 'Pooled prompt embeddings must be provided currently.'
+        assert prompt_mask is not None, 'Prompt mask must be provided currently.'
+        text_embeddings = prompt_embeds
+        pooled_embedding = pooled_prompt
+
+        # Generate initial noise
+        latent_height = height // self.downsample_factor
+        latent_width = width // self.downsample_factor
+        latents = torch.randn(text_embeddings.shape[0],
+                              self.latent_channels,
+                              latent_height,
+                              latent_width,
+                              device=device)
+        latent_patches, latent_coords = patchify(latents, self.patch_size)
+
+        text_embeddings_coords = self.make_text_embeddings_coords(text_embeddings)
+        if neg_prompt_embeds is None:
+            # Zero out negative prompt embeddings if not provided
+            neg_text_embeddings = torch.zeros_like(text_embeddings)
+            pooled_neg_embedding = torch.zeros_like(pooled_embedding)
+            neg_prompt_mask = torch.zeros_like(prompt_mask)
+        else:
+            pooled_neg_embedding = pooled_neg_prompt
+            neg_text_embeddings = neg_prompt_embeds
+        assert neg_prompt_mask is not None, 'Negative prompt mask must be provided currently.'
+        assert pooled_neg_embedding is not None, 'Pooled negative prompt embeddings must be provided currently.'
+        neg_text_embeddings_coords = self.make_text_embeddings_coords(neg_text_embeddings)
+
+        # Set up for CFG
+        text_embeddings = torch.cat([text_embeddings, neg_text_embeddings], dim=0)
+        text_embeddings_coords = torch.cat([text_embeddings_coords, neg_text_embeddings_coords], dim=0)
+        text_embeddings_mask = torch.cat([prompt_mask, neg_prompt_mask], dim=0)
+        pooled_embedding = torch.cat([pooled_embedding, pooled_neg_embedding], dim=0)
+        latent_coords_input = torch.cat([latent_coords, latent_coords], dim=0)
+
+        # backward diffusion process
+        timesteps, delta_t = self.make_sampling_timesteps(num_inference_steps)
+        timesteps, delta_t = timesteps.to(device), delta_t.to(device)
+        for i, t in tqdm(enumerate(timesteps), disable=not progress_bar):
+            latent_patches_input = torch.cat([latent_patches, latent_patches], dim=0)
+            # Get the model prediction
+            model_out = self.model(latent_patches_input,
+                                   latent_coords_input,
+                                   t.unsqueeze(0),
+                                   conditioning=text_embeddings,
+                                   conditioning_coords=text_embeddings_coords,
+                                   input_mask=None,
+                                   conditioning_mask=text_embeddings_mask,
+                                   constant_conditioning=pooled_embedding)
+            # Do CFG
+            pred_cond, pred_uncond = model_out.chunk(2, dim=0)
+            pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+            # Optionally rescale the classifer free guidance
+            if rescaled_guidance is not None:
+                std_pos = torch.std(pred_cond, dim=(1, 2), keepdim=True)
+                std_cfg = torch.std(pred, dim=(1, 2), keepdim=True)
+                pred_rescaled = pred * (std_pos / std_cfg)
+                pred = pred_rescaled * rescaled_guidance + pred * (1 - rescaled_guidance)
+            # Update the latents
+            latent_patches = latent_patches - pred * delta_t[i]
+        # Decode the latents
+        image = self.decode_image(latent_patches, latent_coords)
+        return image.detach()  # (batch*num_images_per_prompt, channel, h, w)
