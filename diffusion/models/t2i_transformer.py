@@ -524,14 +524,11 @@ class ComposerPrecomputedTextToImageMMDiT(ComposerModel):
         self.clip_embedding_mlp = VectorEmbedding(pooled_embedding_features, model.num_features)
         # freeze text_encoder during diffusion training and use half precision
         self.autoencoder.requires_grad_(False)
-        self.text_encoder.requires_grad_(False)
         self.autoencoder = self.autoencoder.half()
-        self.text_encoder = self.text_encoder.half()
 
         # Only FSDP wrap models we are training
         self.model._fsdp_wrap = True
         self.autoencoder._fsdp_wrap = False
-        self.text_encoder._fsdp_wrap = True
 
         # Param counts relevant for MFU computation
         # First calc the AdaLN params separately
