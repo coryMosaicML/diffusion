@@ -566,7 +566,7 @@ class ComposerPrecomputedTextToImageMMDiT(ComposerModel):
         batch_size = batch[self.image_key].shape[0]
         height, width = batch[self.image_key].shape[2:]
         input_seq_len = height * width / (self.patch_size**2 * self.downsample_factor**2)
-        cond_seq_len = batch[self.caption_key].shape[1]
+        cond_seq_len = batch['T5_LATENTS'].shape[1] + batch['CLIP_LATENTS'].shape[1]
         seq_len = input_seq_len + cond_seq_len
         # Calulate forward flops on full sequence excluding attention
         param_flops = 2 * self.n_seq_params * batch_size * seq_len
@@ -810,7 +810,7 @@ class ComposerPrecomputedTextToImageMMDiT(ComposerModel):
         latent_coords_input = torch.cat([latent_coords, latent_coords], dim=0)
 
         pooled_embedding = self.pooled_embedding_mlp(pooled_embedding)
-        
+
         # backward diffusion process
         timesteps, delta_t = self.make_sampling_timesteps(num_inference_steps)
         timesteps, delta_t = timesteps.to(device), delta_t.to(device)
