@@ -164,6 +164,7 @@ class StableDiffusion(ComposerModel):
         # See https://arxiv.org/abs/2303.09556 for more details
         if self.min_snr_gamma is not None:
             self.loss_weights = torch.min(SNR, torch.tensor(self.min_snr_gamma))
+            self.loss_weights = self.loss_weights / SNR
         else:
             self.loss_weights = None
 
