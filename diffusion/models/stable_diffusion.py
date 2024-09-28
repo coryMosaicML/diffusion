@@ -40,6 +40,8 @@ class StableDiffusion(ComposerModel):
         num_images_per_prompt (int): How many images to generate per prompt
             for evaluation. Default: `1`.
         loss_fn (torch.nn.Module): torch loss function. Default: `F.mse_loss`.
+        min_snr_gamma (Optional[float]): Gamma value for min-SNR-gamma loss weighting. if not specified,
+            min-SNR-gamma loss weighting will not be used. Default: `None`.
         prediction_type (str): The type of prediction to use. Must be one of 'sample',
             'epsilon', or 'v_prediction'. Default: `epsilon`.
         latent_mean (Optional[tuple[float]]): The means of the latent space. If not specified, defaults to
@@ -84,6 +86,7 @@ class StableDiffusion(ComposerModel):
                  noise_scheduler,
                  inference_noise_scheduler,
                  loss_fn=F.mse_loss,
+                 min_snr_gamma: Optional[float] = None,
                  prediction_type: str = 'epsilon',
                  latent_mean: Optional[Tuple[float]] = None,
                  latent_std: Optional[Tuple[float]] = None,
@@ -108,6 +111,7 @@ class StableDiffusion(ComposerModel):
         self.vae = vae
         self.noise_scheduler = noise_scheduler
         self.loss_fn = loss_fn
+        self.min_snr_gamma = min_snr_gamma
         self.prediction_type = prediction_type.lower()
         if self.prediction_type not in ['sample', 'epsilon', 'v_prediction']:
             raise ValueError(f'prediction type must be one of sample, epsilon, or v_prediction. Got {prediction_type}')
@@ -152,6 +156,16 @@ class StableDiffusion(ComposerModel):
         self.rng_generator: Optional[torch.Generator] = None
         if self.quasirandomness:
             self.sobol = qmc.Sobol(d=1, scramble=True, seed=self.train_seed)
+
+        # Calculate loss weights from the SNR of the scheduler
+        alpha_bar = self.noise_scheduler.alphas_cumprod
+        SNR = alpha_bar / (1 - alpha_bar)
+        # weights are calculated min (SNR, gamma)
+        # See https://arxiv.org/abs/2303.09556 for more details
+        if self.min_snr_gamma is not None:
+            self.loss_weights = torch.min(SNR, torch.tensor(self.min_snr_gamma))
+        else:
+            self.loss_weights = None
 
     def _apply(self, fn):
         super(StableDiffusion, self)._apply(fn)
@@ -259,7 +273,12 @@ class StableDiffusion(ComposerModel):
 
     def loss(self, outputs, batch):
         """Loss between unet output and added noise, typically mse."""
-        return self.loss_fn(outputs[0], outputs[1])
+        if self.loss_weights is not None:
+            loss = self.loss_fn(outputs[0], outputs[1], reduction='none').mean(dim=(1, 2, 3))
+            loss = self.loss_weights[outputs[2]] * loss
+            return loss.mean()
+        else:
+            return self.loss_fn(outputs[0], outputs[1])
 
     def eval_forward(self, batch, outputs=None):
         """For stable diffusion, eval forward computes unet outputs as well as some samples."""

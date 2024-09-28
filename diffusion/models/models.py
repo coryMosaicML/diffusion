@@ -291,6 +291,7 @@ def stable_diffusion_xl(
     zero_terminal_snr: bool = False,
     use_karras_sigmas: bool = False,
     offset_noise: Optional[float] = None,
+    min_snr_gamma: Optional[float] = None,
     scheduler_shift_resolution: int = 256,
     train_metrics: Optional[List] = None,
     val_metrics: Optional[List] = None,
@@ -342,6 +343,8 @@ def stable_diffusion_xl(
         zero_terminal_snr (bool): Whether to enforce zero terminal SNR. Default: `False`.
         use_karras_sigmas (bool): Whether to use the Karras sigmas for the diffusion process noise. Default: `False`.
         offset_noise (float, optional): The scale of the offset noise. If not specified, offset noise will not
+            be used. Default `None`.
+        min_snr_gamma (float, optional): The gamma value for the minimum SNR. If not specified, minimum SNR will not
             be used. Default `None`.
         scheduler_shift_resolution (int): The resolution to shift the noise scheduler to. Default: `256`.
         train_metrics (list, optional): List of metrics to compute during training. If None, defaults to
@@ -516,6 +519,7 @@ def stable_diffusion_xl(
         latent_mean=latent_mean,
         latent_std=latent_std,
         downsample_factor=downsample_factor,
+        min_snr_gamma=min_snr_gamma,
         offset_noise=offset_noise,
         train_metrics=train_metrics,
         val_metrics=val_metrics,
