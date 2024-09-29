@@ -276,6 +276,7 @@ class StableDiffusion(ComposerModel):
         """Loss between unet output and added noise, typically mse."""
         if self.loss_weights is not None:
             loss = self.loss_fn(outputs[0], outputs[1], reduction='none').mean(dim=(1, 2, 3))
+            self.loss_weights = self.loss_weights.to(loss.device)
             loss = self.loss_weights[outputs[2]] * loss
             return loss.mean()
         else:
