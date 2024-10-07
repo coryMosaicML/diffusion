@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from composer.devices import DeviceGPU
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
+from diffusers import (AutoencoderKL, DDIMScheduler, DDPMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler,
+                       UNet2DConditionModel)
 from peft import LoraConfig
 from torchmetrics import MeanSquaredError
 from transformers import AutoModel, AutoTokenizer, CLIPTextModel, CLIPTokenizer, PretrainedConfig
@@ -291,6 +292,7 @@ def stable_diffusion_xl(
     beta_end: float = 0.012,
     zero_terminal_snr: bool = False,
     use_karras_sigmas: bool = False,
+    use_dpm_scheduler: bool = False,
     offset_noise: Optional[float] = None,
     scheduler_shift_resolution: int = 256,
     train_metrics: Optional[List] = None,
@@ -342,6 +344,7 @@ def stable_diffusion_xl(
         beta_end (float): The ending beta value. Default: `0.012`.
         zero_terminal_snr (bool): Whether to enforce zero terminal SNR. Default: `False`.
         use_karras_sigmas (bool): Whether to use the Karras sigmas for the diffusion process noise. Default: `False`.
+        use_dpm_scheduler (bool): Whether to use the DPM scheduler. Default: `False`.
         offset_noise (float, optional): The scale of the offset noise. If not specified, offset noise will not
             be used. Default `None`.
         scheduler_shift_resolution (int): The resolution to shift the noise scheduler to. Default: `256`.
@@ -474,28 +477,37 @@ def stable_diffusion_xl(
                                     timestep_spacing='leading',
                                     steps_offset=1,
                                     rescale_betas_zero_snr=zero_terminal_snr)
-    if beta_schedule == 'squaredcos_cap_v2':
-        inference_noise_scheduler = DDIMScheduler(num_train_timesteps=1000,
-                                                  beta_start=beta_start,
-                                                  beta_end=beta_end,
-                                                  beta_schedule=beta_schedule,
-                                                  trained_betas=None,
-                                                  clip_sample=False,
-                                                  set_alpha_to_one=False,
-                                                  prediction_type=prediction_type,
-                                                  rescale_betas_zero_snr=zero_terminal_snr)
+    if use_dpm_scheduler:
+        inference_noise_scheduler = DPMSolverMultistepScheduler(num_train_timesteps=1000,
+                                                                beta_start=beta_start,
+                                                                beta_end=beta_end,
+                                                                beta_schedule=beta_schedule,
+                                                                trained_betas=None,
+                                                                prediction_type=prediction_type,
+                                                                rescale_betas_zero_snr=zero_terminal_snr)
     else:
-        inference_noise_scheduler = EulerDiscreteScheduler(num_train_timesteps=1000,
-                                                           beta_start=beta_start,
-                                                           beta_end=beta_end,
-                                                           beta_schedule=beta_schedule,
-                                                           trained_betas=None,
-                                                           prediction_type=prediction_type,
-                                                           interpolation_type='linear',
-                                                           use_karras_sigmas=use_karras_sigmas,
-                                                           timestep_spacing='leading',
-                                                           steps_offset=1,
-                                                           rescale_betas_zero_snr=zero_terminal_snr)
+        if beta_schedule == 'squaredcos_cap_v2':
+            inference_noise_scheduler = DDIMScheduler(num_train_timesteps=1000,
+                                                      beta_start=beta_start,
+                                                      beta_end=beta_end,
+                                                      beta_schedule=beta_schedule,
+                                                      trained_betas=None,
+                                                      clip_sample=False,
+                                                      set_alpha_to_one=False,
+                                                      prediction_type=prediction_type,
+                                                      rescale_betas_zero_snr=zero_terminal_snr)
+        else:
+            inference_noise_scheduler = EulerDiscreteScheduler(num_train_timesteps=1000,
+                                                               beta_start=beta_start,
+                                                               beta_end=beta_end,
+                                                               beta_schedule=beta_schedule,
+                                                               trained_betas=None,
+                                                               prediction_type=prediction_type,
+                                                               interpolation_type='linear',
+                                                               use_karras_sigmas=use_karras_sigmas,
+                                                               timestep_spacing='leading',
+                                                               steps_offset=1,
+                                                               rescale_betas_zero_snr=zero_terminal_snr)
 
     # Shift noise scheduler to correct for resolution changes
     noise_scheduler = shift_noise_schedule(noise_scheduler,
