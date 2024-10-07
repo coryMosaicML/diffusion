@@ -478,12 +478,13 @@ def stable_diffusion_xl(
                                     steps_offset=1,
                                     rescale_betas_zero_snr=zero_terminal_snr)
     if use_dpm_scheduler:
+        if use_karras_sigmas:
+            raise ValueError('Karras sigmas are not supported with DPM scheduler.')
         inference_noise_scheduler = DPMSolverMultistepScheduler(num_train_timesteps=1000,
                                                                 beta_start=beta_start,
                                                                 beta_end=beta_end,
                                                                 beta_schedule=beta_schedule,
                                                                 trained_betas=None,
-                                                                use_karras_sigmas=use_karras_sigmas,
                                                                 prediction_type=prediction_type,
                                                                 timestep_spacing='leading',
                                                                 rescale_betas_zero_snr=zero_terminal_snr)
