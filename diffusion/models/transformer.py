@@ -203,6 +203,8 @@ class XformersMemoryEfficientAttention(nn.Module):
         super().__init__()
 
     def forward(self, q, k, v, bias):
+        # Cast everything to bfloat16
+        q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
         attn_out = memory_efficient_attention(q, k, v, attn_bias=bias)
         return attn_out
 
