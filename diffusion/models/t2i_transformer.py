@@ -208,7 +208,7 @@ class ComposerTextToImageMMDiT(ComposerModel):
 
     def encode_image(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode an image tensor with the autoencoder and patchify the latents."""
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             latents = self.autoencoder.encode(image.half())['latent_dist'].sample().data
         # Scale and patchify the latents
         latents = (latents - self.latent_mean) / self.latent_std
@@ -226,7 +226,7 @@ class ComposerTextToImageMMDiT(ComposerModel):
         # Scale the latents back to the original scale
         latents = latents * self.latent_std + self.latent_mean
         # Decode the latents
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             image = self.autoencoder.decode(latents.half()).sample
         image = (image / 2 + 0.5).clamp(0, 1)
         return image
@@ -263,7 +263,7 @@ class ComposerTextToImageMMDiT(ComposerModel):
             self, tokenized_prompts: torch.Tensor,
             attention_masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Use the model's text encoder to embed tokenized prompts and create pooled text embeddings."""
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             # Ensure text embeddings are not longer than the model can handle
             if tokenized_prompts.shape[1] > self.model.conditioning_max_sequence_length:
                 tokenized_prompts = tokenized_prompts[:, :self.model.conditioning_max_sequence_length]
