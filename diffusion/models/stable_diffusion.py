@@ -293,7 +293,7 @@ class StableDiffusion(ComposerModel):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: Optional[int] = 50,
-        guidance_scale: Optional[float] = 3.0,
+        guidance_scale: float = 7.0,
         rescaled_guidance: Optional[float] = None,
         num_images_per_prompt: Optional[int] = 1,
         seed: Optional[int] = None,
@@ -452,13 +452,17 @@ class StableDiffusion(ComposerModel):
             if do_classifier_free_guidance:
                 # perform guidance. Note this is only techincally correct for prediction_type 'epsilon'
                 pred_uncond, pred_text = pred.chunk(2)
-                pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
-                # Optionally rescale the classifer free guidance
-                if rescaled_guidance is not None:
-                    std_pos = torch.std(pred_text, dim=(1, 2, 3), keepdim=True)
-                    std_cfg = torch.std(pred, dim=(1, 2, 3), keepdim=True)
-                    pred_rescaled = pred * (std_pos / std_cfg)
-                    pred = pred_rescaled * rescaled_guidance + pred * (1 - rescaled_guidance)
+                #pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
+                # Replace CFG with a slerp
+                cond_norm = torch.sqrt(torch.square(pred_text).sum(dim=(1, 2, 3), keepdim=True))
+                uncond_norm = torch.sqrt(torch.square(pred_uncond).sum(dim=(1, 2, 3), keepdim=True))
+                cond = pred_text / cond_norm
+                uncond = pred_uncond / uncond_norm
+                angle = torch.arccos((cond * uncond).sum(dim=(1, 2, 3), keepdim=True))
+                gs = guidance_scale
+                unit_pred = torch.sin(
+                    (1 - gs) * angle) / torch.sin(angle) * uncond + torch.sin(gs * angle) / torch.sin(angle) * cond
+                pred = unit_pred * cond_norm
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.inference_scheduler.step(pred, t, latents, generator=rng_generator).prev_sample
 
