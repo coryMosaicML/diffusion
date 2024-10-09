@@ -501,6 +501,11 @@ class DiffusionTransformer(nn.Module):
 
         # Concatenate the masks. Note we have conditioning first for the block diagonal structure
         mask = torch.cat([conditioning_mask, mask], dim=1)  # (B, T1 + T2)
+        # Pad the mask and the conditioning sequence such that the combined sequence length is divisible by 8
+        _, remainder = divmod(mask.shape[1], 8)
+        pad_len = (8 - remainder) % 8
+        mask = F.pad(mask, (pad_len, 0, 0, 0), value=0.0)
+        c = F.pad(c, (0, 0, pad_len, 0, 0, 0), value=0.0)
         # Expand the mask to the right shape
         mask = mask.bool()
         mask = mask.unsqueeze(-1) & mask.unsqueeze(1)  # (B, T1 + T2, T1 + T2)
