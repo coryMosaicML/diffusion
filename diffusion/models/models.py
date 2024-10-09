@@ -900,6 +900,7 @@ def text_to_image_transformer(
     image_key: str = 'image',
     caption_key: str = 'captions',
     caption_mask_key: str = 'attention_mask',
+    use_xformers: bool = False,
     pretrained: bool = False,
 ):
     """Text to image transformer training setup.
@@ -931,6 +932,7 @@ def text_to_image_transformer(
         image_key (str): The key for the image in the batch. Default: `image`.
         caption_key (str): The key for the captions in the batch. Default: `captions`.
         caption_mask_key (str): The key for the caption mask in the batch. Default: `attention_mask`.
+        use_xformers (bool): Whether to use xformers for attention. Defaults to False.
         pretrained (bool): Whether to load pretrained weights. Not used. Defaults to False.
     """
     latent_mean, latent_std = _parse_latent_statistics(latent_mean), _parse_latent_statistics(latent_std)
@@ -987,7 +989,8 @@ def text_to_image_transformer(
                                        conditioning_features=conditioning_features,
                                        conditioning_max_sequence_length=conditioning_max_sequence_length,
                                        conditioning_dimension=1,
-                                       expansion_factor=4)
+                                       expansion_factor=4,
+                                       use_xformers=use_xformers)
     # Make the composer model
     model = ComposerTextToImageMMDiT(model=transformer,
                                      autoencoder=vae,

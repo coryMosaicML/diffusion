@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from xformers.ops import memory_efficient_attention
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -195,18 +196,35 @@ class PreAttentionBlock(nn.Module):
         return q, k, v
 
 
+class XformersMemoryEfficientAttention(nn.Module):
+    """Memory efficient attention layer using the xformers library."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, q, k, v, bias):
+        q, k, v = q.float(), k.float(), v.float()
+        attn_out = memory_efficient_attention(q, k, v, attn_bias=bias)
+        return attn_out
+
+
 class SelfAttention(nn.Module):
     """Standard multihead self attention layer that supports masking.
 
     Args:
         num_features (int): Number of input features.
         num_heads (int): Number of attention heads.
+        use_xformers (bool): Whether to use the xformers library. Default: `False`.
     """
 
-    def __init__(self, num_features: int, num_heads: int):
+    def __init__(self, num_features: int, num_heads: int, use_xformers: bool = False):
         super().__init__()
         self.num_features = num_features
         self.num_heads = num_heads
+        self.use_xformers = use_xformers
+        self.attn_layer = None
+        if self.use_xformers:
+            self.attn_layer = XformersMemoryEfficientAttention()
 
     def forward(self,
                 q: torch.Tensor,
@@ -216,11 +234,16 @@ class SelfAttention(nn.Module):
         # Get the shape of the inputs
         B, T, C = v.size()
         # Reshape the query, key, and values for multi-head attention
-        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
-        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
-        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
-        # Native torch attention
-        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)  # (B, H, T, C/H)
+        q = q.view(B, T, self.num_heads, C // self.num_heads)
+        k = k.view(B, T, self.num_heads, C // self.num_heads)
+        v = v.view(B, T, self.num_heads, C // self.num_heads)
+        if self.use_xformers and self.attn_layer is not None:
+            # Don't need to transpose for xformers
+            attention_out = self.attn_layer(q, k, v, mask)
+        else:
+            # Native torch attention
+            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+            attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)  # (B, H, T, C/H)
         # Swap the sequence length and the head dimension back and get rid of num_heads.
         attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
         return attention_out
@@ -284,19 +307,26 @@ class MMDiTBlock(nn.Module):
         num_heads (int): Number of attention heads.
         expansion_factor (int): Expansion factor for the MLP. Default: `4`.
         is_last (bool): Whether this is the last block in the network. Default: `False`.
+        use_xformers (bool): Whether to use the xformers library. Default: `False`.
     """
 
-    def __init__(self, num_features: int, num_heads: int, expansion_factor: int = 4, is_last: bool = False):
+    def __init__(self,
+                 num_features: int,
+                 num_heads: int,
+                 expansion_factor: int = 4,
+                 is_last: bool = False,
+                 use_xformers: bool = False):
         super().__init__()
         self.num_features = num_features
         self.num_heads = num_heads
         self.expansion_factor = expansion_factor
         self.is_last = is_last
+        self.use_xformers = use_xformers
         # Pre-attention blocks for two modalities
         self.pre_attention_block_1 = PreAttentionBlock(self.num_features)
         self.pre_attention_block_2 = PreAttentionBlock(self.num_features)
         # Self-attention
-        self.attention = SelfAttention(self.num_features, self.num_heads)
+        self.attention = SelfAttention(self.num_features, self.num_heads, use_xformers=self.use_xformers)
         # Post-attention blocks for two modalities
         self.post_attention_block_1 = PostAttentionBlock(self.num_features, self.expansion_factor)
         if not self.is_last:
@@ -311,14 +341,14 @@ class MMDiTBlock(nn.Module):
         q1, k1, v1 = self.pre_attention_block_1(x1, t)
         q2, k2, v2 = self.pre_attention_block_2(x2, t)
         # Concat q, k, v along the sequence dimension
-        q = torch.cat([q1, q2], dim=1)
-        k = torch.cat([k1, k2], dim=1)
-        v = torch.cat([v1, v2], dim=1)
+        q = torch.cat([q2, q1], dim=1)
+        k = torch.cat([k2, k1], dim=1)
+        v = torch.cat([v2, v1], dim=1)
         # Self-attention
         v = self.attention(q, k, v, mask=mask)
         # Split the attention output back into the two modalities
         seq_len_1, seq_len_2 = x1.size(1), x2.size(1)
-        y1, y2 = v.split([seq_len_1, seq_len_2], dim=1)
+        y2, y1 = v.split([seq_len_2, seq_len_1], dim=1)
         # Post-attention for the two modalities
         y1 = self.post_attention_block_1(y1, x1, t)
         if not self.is_last:
@@ -342,6 +372,7 @@ class DiffusionTransformer(nn.Module):
         conditioning_max_sequence_length (int): Maximum sequence length for the conditioning sequence. Default: `77`.
         conditioning_dimension (int): Dimension of the conditioning sequence. Default: `1`.
         expansion_factor (int): Expansion factor for the MLPs. Default: `4`.
+        use_xformers (bool): Whether to use the xformers library. Default: `False`.
     """
 
     def __init__(self,
@@ -354,13 +385,15 @@ class DiffusionTransformer(nn.Module):
                  conditioning_features: int = 1024,
                  conditioning_max_sequence_length: int = 77,
                  conditioning_dimension: int = 1,
-                 expansion_factor: int = 4):
+                 expansion_factor: int = 4,
+                 use_xformers: bool = False):
         super().__init__()
         # Params for the network architecture
         self.num_features = num_features
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.expansion_factor = expansion_factor
+        self.use_xformers = use_xformers
         # Params for input embeddings
         self.input_features = input_features
         self.input_dimension = input_dimension
@@ -387,8 +420,10 @@ class DiffusionTransformer(nn.Module):
         self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
-            MMDiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
-            for _ in range(self.num_layers - 1)
+            MMDiTBlock(self.num_features,
+                       self.num_heads,
+                       expansion_factor=self.expansion_factor,
+                       use_xformers=self.use_xformers) for _ in range(self.num_layers - 1)
         ])
         # Turn off post attn layers for conditioning sequence in final block
         self.transformer_blocks.append(
@@ -460,14 +495,24 @@ class DiffusionTransformer(nn.Module):
         # Concatenate the masks
         if conditioning_mask is None:
             conditioning_mask = torch.ones(conditioning.shape[0], conditioning.shape[1], device=conditioning.device)
-        mask = torch.cat([mask, conditioning_mask], dim=1)  # (B, T1 + T2)
+        # Now we reverse the conditioning sequences in time so the attn can be block diagonal
+        c = torch.flip(c, [1])
+        conditioning_mask = torch.flip(conditioning_mask, [1])
 
+        # Concatenate the masks. Note we have conditioning first for the block diagonal structure
+        mask = torch.cat([conditioning_mask, mask], dim=1)  # (B, T1 + T2)
         # Expand the mask to the right shape
         mask = mask.bool()
         mask = mask.unsqueeze(-1) & mask.unsqueeze(1)  # (B, T1 + T2, T1 + T2)
         identity = torch.eye(mask.shape[1], device=mask.device, dtype=mask.dtype).unsqueeze(0)
         mask = mask | identity
         mask = mask.unsqueeze(1)  # (B, 1, T1 + T2, T1 + T2)
+        if self.use_xformers:
+            # Mask is a boolean mask and we need to convert it to float biases instead
+            mask = mask.float()
+            mask[mask == 0] = float('-inf')
+            mask[mask == 1] = 0.0
+            mask = mask.repeat(1, self.num_heads, 1, 1)
 
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
