@@ -293,7 +293,7 @@ class StableDiffusion(ComposerModel):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: Optional[int] = 50,
-        guidance_scale: Optional[float] = 3.0,
+        guidance_scale: float = 7.0,
         rescaled_guidance: Optional[float] = None,
         num_images_per_prompt: Optional[int] = 1,
         seed: Optional[int] = None,
@@ -435,6 +435,7 @@ class StableDiffusion(ComposerModel):
             added_cond_kwargs = {'text_embeds': pooled_embeddings, 'time_ids': add_time_ids}
 
         # backward diffusion process
+        dt_beta = 0.0
         for t in tqdm(self.inference_scheduler.timesteps, disable=not progress_bar):
             if do_classifier_free_guidance:
                 latent_model_input = torch.cat([latents] * 2)
@@ -452,13 +453,16 @@ class StableDiffusion(ComposerModel):
             if do_classifier_free_guidance:
                 # perform guidance. Note this is only techincally correct for prediction_type 'epsilon'
                 pred_uncond, pred_text = pred.chunk(2)
-                pred = pred_uncond + guidance_scale * (pred_text - pred_uncond)
-                # Optionally rescale the classifer free guidance
-                if rescaled_guidance is not None:
-                    std_pos = torch.std(pred_text, dim=(1, 2, 3), keepdim=True)
-                    std_cfg = torch.std(pred, dim=(1, 2, 3), keepdim=True)
-                    pred_rescaled = pred * (std_pos / std_cfg)
-                    pred = pred_rescaled * rescaled_guidance + pred * (1 - rescaled_guidance)
+                # Here just use the perpendicular component
+                dt = pred_text - pred_uncond
+                dot_product = torch.sum(dt * pred_text, dim=(1, 2, 3), keepdim=True)
+                norm_squared = torch.sum(pred_text * pred_text, dim=(1, 2, 3), keepdim=True) + 1.0e-6
+                dt_perp = dt - pred_text * dot_product / norm_squared
+                dt = dt_perp
+                dt = dt * torch.minimum(torch.full_like(dt, 1.0),
+                                        2.5 / torch.sqrt(torch.sum(dt * dt, (1, 2, 3), keepdim=True)))
+                dt_beta = dt - 0.75 * dt_beta
+                pred = pred_text + (guidance_scale - 1) * dt_beta
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.inference_scheduler.step(pred, t, latents, generator=rng_generator).prev_sample
 
