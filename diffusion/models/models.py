@@ -20,7 +20,7 @@ from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttn
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.precomputed_text_latent_diffusion import PrecomputedTextLatentDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
-from diffusion.models.t2i_transformer import ComposerTextToImageMMDiT
+from diffusion.models.t2i_transformer import ComposerDistilledTextToImageMMDiT, ComposerTextToImageMMDiT
 from diffusion.models.text_encoder import MultiTextEncoder, MultiTokenizer
 from diffusion.models.transformer import DiffusionTransformer
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
@@ -901,6 +901,7 @@ def text_to_image_transformer(
     caption_key: str = 'captions',
     caption_mask_key: str = 'attention_mask',
     pretrained: bool = False,
+    distill: bool = False,
 ):
     """Text to image transformer training setup.
 
@@ -932,6 +933,7 @@ def text_to_image_transformer(
         caption_key (str): The key for the captions in the batch. Default: `captions`.
         caption_mask_key (str): The key for the caption mask in the batch. Default: `attention_mask`.
         pretrained (bool): Whether to load pretrained weights. Not used. Defaults to False.
+        distill (bool): Whether to use distillation. Defaults to False.
     """
     latent_mean, latent_std = _parse_latent_statistics(latent_mean), _parse_latent_statistics(latent_std)
 
@@ -989,21 +991,39 @@ def text_to_image_transformer(
                                        conditioning_dimension=1,
                                        expansion_factor=4)
     # Make the composer model
-    model = ComposerTextToImageMMDiT(model=transformer,
-                                     autoencoder=vae,
-                                     text_encoder=text_encoder,
-                                     tokenizer=tokenizer,
-                                     latent_mean=latent_mean,
-                                     latent_std=latent_std,
-                                     patch_size=patch_size,
-                                     downsample_factor=downsample_factor,
-                                     latent_channels=autoencoder_channels,
-                                     timestep_mean=timestep_mean,
-                                     timestep_std=timestep_std,
-                                     timestep_shift=timestep_shift,
-                                     image_key=image_key,
-                                     caption_key=caption_key,
-                                     caption_mask_key=caption_mask_key)
+    if distill:
+        model = ComposerDistilledTextToImageMMDiT(model=transformer,
+                                                  autoencoder=vae,
+                                                  text_encoder=text_encoder,
+                                                  tokenizer=tokenizer,
+                                                  latent_mean=latent_mean,
+                                                  latent_std=latent_std,
+                                                  patch_size=patch_size,
+                                                  downsample_factor=downsample_factor,
+                                                  latent_channels=autoencoder_channels,
+                                                  timestep_mean=timestep_mean,
+                                                  timestep_std=timestep_std,
+                                                  timestep_shift=timestep_shift,
+                                                  image_key=image_key,
+                                                  caption_key=caption_key,
+                                                  caption_mask_key=caption_mask_key,
+                                                  num_distillation_steps=4)
+    else:
+        model = ComposerTextToImageMMDiT(model=transformer,
+                                         autoencoder=vae,
+                                         text_encoder=text_encoder,
+                                         tokenizer=tokenizer,
+                                         latent_mean=latent_mean,
+                                         latent_std=latent_std,
+                                         patch_size=patch_size,
+                                         downsample_factor=downsample_factor,
+                                         latent_channels=autoencoder_channels,
+                                         timestep_mean=timestep_mean,
+                                         timestep_std=timestep_std,
+                                         timestep_shift=timestep_shift,
+                                         image_key=image_key,
+                                         caption_key=caption_key,
+                                         caption_mask_key=caption_mask_key)
 
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)

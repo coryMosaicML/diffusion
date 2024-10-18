@@ -454,6 +454,80 @@ class NlayerDiscriminator(nn.Module):
         return self.blocks(x)
 
 
+class MSEWithDiscriminatorLoss(nn.Module):
+    """Loss function for training with MSE and a discriminator.
+
+    Args:
+        output_channels (int): Number of output channels. Default: `3`.
+        discriminator_weight (float): Weight for the discriminator loss. Default: `0.5`.
+        discriminator_num_filters (int): Number of filters in the first layer of the discriminator. Default: `64`.
+        discriminator_num_layers (int): Number of layers in the discriminator. Default: `3`.
+    """
+
+    def __init__(self,
+                 output_channels: int = 3,
+                 discriminator_weight: float = 0.5,
+                 discriminator_num_filters: int = 64,
+                 discriminator_num_layers: int = 3):
+        super().__init__()
+        self.output_channels = output_channels
+        self.discriminator_weight = discriminator_weight
+        self.discriminator_num_filters = discriminator_num_filters
+        self.discriminator_num_layers = discriminator_num_layers
+
+        # Set up the discriminator
+        self.discriminator = NlayerDiscriminator(input_channels=self.output_channels,
+                                                 num_filters=self.discriminator_num_filters,
+                                                 num_layers=self.discriminator_num_layers)
+        self.scale_gradients = GradientScalingLayer()
+        self.scale_gradients.register_full_backward_hook(self.scale_gradients.backward_hook)
+
+    def set_discriminator_weight(self, weight: float):
+        self.discriminator_weight = weight
+
+    def calc_discriminator_adaptive_weight(self, mse_loss, fake_loss, last_layer):
+        # Need to ensure the grad scale from the discriminator back to 1.0 to get the right norm
+        self.scale_gradients.set_scale(1.0)
+        # Get the grad norm from the mse loss
+        mse_grads = torch.autograd.grad(mse_loss, last_layer, retain_graph=True)[0]
+        # Get the grad norm for the discriminator loss
+        disc_grads = torch.autograd.grad(fake_loss, last_layer, retain_graph=True)[0]
+        # Calculate the updated discriminator weight based on the grad norms
+        mse_grads_norm = torch.norm(mse_grads)
+        disc_grads_norm = torch.norm(disc_grads)
+        disc_weight = mse_grads_norm / (disc_grads_norm + 1e-4)
+        disc_weight = torch.clamp(disc_weight, 0.0, 1e4).detach()
+        disc_weight *= self.discriminator_weight
+        # Set the discriminator weight. It should be negative to reverse gradients into the autoencoder.
+        self.scale_gradients.set_scale(-disc_weight.item())
+        return disc_weight, mse_grads_norm, disc_grads_norm
+
+    def forward(self, mse_pred, mse_target, fake_input, real_input, last_layer):
+        losses = {}
+        # Basic MSE
+        mse_loss = F.mse_loss(mse_pred, mse_target)
+        losses['mse_loss'] = mse_loss
+        # Discriminator loss
+        real = self.discriminator(real_input)
+        fake = self.discriminator(self.scale_gradients(fake_input))
+        real_loss = F.binary_cross_entropy_with_logits(real, torch.ones_like(real))
+        fake_loss = F.binary_cross_entropy_with_logits(fake, torch.zeros_like(fake))
+        losses['disc_real_loss'] = real_loss
+        losses['disc_fake_loss'] = fake_loss
+        losses['disc_loss'] = 0.5 * (real_loss + fake_loss)
+        # Update the adaptive discriminator weight
+        disc_weight, mse_grads_norm, disc_grads_norm = self.calc_discriminator_adaptive_weight(
+            mse_loss, fake_loss, last_layer)
+        losses['disc_weight'] = disc_weight
+        losses['mse_grads_norm'] = mse_grads_norm
+        losses['disc_grads_norm'] = disc_grads_norm
+        # Combine the losses.
+        total_loss = losses['mse_loss']
+        total_loss += losses['disc_loss']
+        losses['total'] = total_loss
+        return losses
+
+
 class AutoEncoderLoss(nn.Module):
     """Loss function for training an autoencoder. Includes LPIPs and a discriminator.
 
