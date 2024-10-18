@@ -488,6 +488,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                          caption_key, caption_mask_key, pooled_embedding_features)
         self.num_distillation_steps = num_distillation_steps
         self.loss_fn = MSEWithDiscriminatorLoss(output_channels=latent_channels, discriminator_weight=0.1)
+        self.loss_fn._fsdp_wrap = True
 
     def diffusion_forward_process(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Diffusion forward process using a rectified flow, restricted to a subset of timesteps."""
@@ -548,10 +549,9 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         timesteps = outputs['timesteps']
         # Get the real and fake images. Use X_0 = X_t - t * V_t
         real_image = self.unpatchify_latents(outputs['latent_patches'], outputs['latent_coords'])
-        fake_image_patches = outputs['noised_inputs'] - timesteps * v_pred
+        fake_image_patches = outputs['noised_inputs'] - timesteps.view(-1, 1, 1) * v_pred
         fake_image = self.unpatchify_latents(fake_image_patches, outputs['latent_coords'])
-        last_layer = self.model.final_linear.weight
-        loss = self.loss_fn(v_pred, v_target, fake_image, real_image, last_layer)
+        loss = self.loss_fn(v_pred, v_target, fake_image, real_image, v_pred)
         return loss
 
     def make_sampling_timesteps(self, N: int):
