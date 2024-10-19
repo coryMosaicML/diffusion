@@ -454,6 +454,42 @@ class NlayerDiscriminator(nn.Module):
         return self.blocks(x)
 
 
+class DiscriminatorLoss(nn.Module):
+    """Discriminator loss function.
+
+    Args:
+        output_channels (int): Number of output channels. Default: `3`.
+        discriminator_num_filters (int): Number of filters in the first layer of the discriminator. Default: `64`.
+        discriminator_num_layers (int): Number of layers in the discriminator. Default: `3`.
+    """
+
+    def __init__(self,
+                 output_channels: int = 3,
+                 discriminator_num_filters: int = 64,
+                 discriminator_num_layers: int = 3):
+        super().__init__()
+        self.output_channels = output_channels
+        self.discriminator_num_filters = discriminator_num_filters
+        self.discriminator_num_layers = discriminator_num_layers
+
+        # Set up the discriminator
+        self.discriminator = NlayerDiscriminator(input_channels=self.output_channels,
+                                                 num_filters=self.discriminator_num_filters,
+                                                 num_layers=self.discriminator_num_layers)
+
+    def forward(self, fake_input, real_input):
+        losses = {}
+        # Discriminator loss
+        real = self.discriminator(real_input)
+        fake = self.discriminator(fake_input)
+        real_loss = F.binary_cross_entropy_with_logits(real, torch.ones_like(real))
+        fake_loss = F.binary_cross_entropy_with_logits(fake, torch.zeros_like(fake))
+        losses['disc_real_loss'] = real_loss
+        losses['disc_fake_loss'] = fake_loss
+        losses['total'] = 0.5 * (real_loss + fake_loss)
+        return losses
+
+
 class MSEWithDiscriminatorLoss(nn.Module):
     """Loss function for training with MSE and a discriminator.
 

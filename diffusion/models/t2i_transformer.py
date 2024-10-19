@@ -12,7 +12,7 @@ from composer.utils import dist
 from torchmetrics import MeanSquaredError
 from tqdm.auto import tqdm
 
-from diffusion.models.autoencoder import MSEWithDiscriminatorLoss
+from diffusion.models.autoencoder import DiscriminatorLoss
 from diffusion.models.transformer import DiffusionTransformer, VectorEmbedding
 
 
@@ -487,7 +487,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                          downsample_factor, latent_channels, timestep_mean, timestep_std, timestep_shift, image_key,
                          caption_key, caption_mask_key, pooled_embedding_features)
         self.num_distillation_steps = num_distillation_steps
-        self.loss_fn = MSEWithDiscriminatorLoss(output_channels=latent_channels, discriminator_weight=0.1)
+        self.loss_fn = DiscriminatorLoss(output_channels=latent_channels)
         self.loss_fn._fsdp_wrap = True
 
     def diffusion_forward_process(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -504,6 +504,13 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         targets = noise - inputs
         return noised_inputs, targets, timesteps[:, 0, 0]
 
+    def make_sampling_timesteps(self, N: int):
+        timesteps = torch.linspace(1, 0, self.num_distillation_steps + 1)
+        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
+        # Make timestep differences
+        delta_t = timesteps[:-1] - timesteps[1:]
+        return timesteps[:-1], delta_t
+
     def forward(self, batch):
         # Get the inputs
         image, caption, caption_mask = batch[self.image_key], batch[self.caption_key], batch[self.caption_mask_key]
@@ -512,24 +519,27 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         # Get the text embeddings and their coords
         text_embeddings, text_embeddings_coords, caption_mask, pooled_text_embeddings = self.embed_tokenized_prompts(
             caption, caption_mask)
-        # Diffusion forward process
-        noised_inputs, targets, timesteps = self.diffusion_forward_process(latent_patches)
-        # Forward through the model
-        model_out = self.model(noised_inputs,
-                               latent_coords,
-                               timesteps,
-                               conditioning=text_embeddings,
-                               conditioning_coords=text_embeddings_coords,
-                               input_mask=None,
-                               conditioning_mask=caption_mask,
-                               constant_conditioning=pooled_text_embeddings)
+        # Sample noise just like the image
+        noised_inputs = torch.randn_like(latent_patches)
+        # Generate images from the noise
+        timesteps, delta_t = self.make_sampling_timesteps(self.num_distillation_steps)
+        timesteps, delta_t = timesteps.to(latent_patches.device), delta_t.to(latent_patches.device)
+        for i, t in enumerate(timesteps):
+            timestep = t.unsqueeze(0)
+            model_out = self.model(noised_inputs,
+                                   latent_coords,
+                                   timestep,
+                                   conditioning=text_embeddings,
+                                   conditioning_coords=text_embeddings_coords,
+                                   input_mask=None,
+                                   conditioning_mask=caption_mask,
+                                   constant_conditioning=pooled_text_embeddings)
+            noised_inputs = noised_inputs - model_out * delta_t[i]
+
         return {
-            'predictions': model_out,
-            'targets': targets,
-            'timesteps': timesteps,
-            'latent_patches': latent_patches,
+            'predictions': noised_inputs,
+            'targets': latent_patches,
             'latent_coords': latent_coords,
-            'noised_inputs': noised_inputs
         }
 
     def unpatchify_latents(self, latent_patches: torch.Tensor, latent_coords: torch.Tensor) -> torch.Tensor:
@@ -544,19 +554,10 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
 
     def loss(self, outputs, batch):
         """MSE loss between outputs and targets."""
-        v_pred = outputs['predictions']
-        v_target = outputs['targets']
-        timesteps = outputs['timesteps']
-        # Get the real and fake images. Use X_0 = X_t - t * V_t
-        real_image = self.unpatchify_latents(outputs['latent_patches'], outputs['latent_coords'])
-        fake_image_patches = outputs['noised_inputs'] - timesteps.view(-1, 1, 1) * v_pred
-        fake_image = self.unpatchify_latents(fake_image_patches, outputs['latent_coords'])
-        loss = self.loss_fn(v_pred, v_target, fake_image, real_image, v_pred)
+        coords = outputs['latent_coords']
+        generated_images = outputs['predictions']
+        generated_images = self.unpatchify_latents(generated_images, coords)
+        real_images = outputs['targets']
+        real_images = self.unpatchify_latents(real_images, coords)
+        loss = self.loss_fn(generated_images, real_images)
         return loss
-
-    def make_sampling_timesteps(self, N: int):
-        timesteps = torch.linspace(1, 0, self.num_distillation_steps + 1)
-        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
-        # Make timestep differences
-        delta_t = timesteps[:-1] - timesteps[1:]
-        return timesteps[:-1], delta_t
