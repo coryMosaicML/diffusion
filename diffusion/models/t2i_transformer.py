@@ -551,6 +551,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                                            conditioning_mask=caption_mask,
                                            constant_conditioning=pooled_text_embeddings)
         targets = (teacher_1_out + teacher_2_out) / 2
+        targets = targets.detach()
 
         return {'predictions': model_out, 'targets': targets, 'timesteps': timesteps}
 
