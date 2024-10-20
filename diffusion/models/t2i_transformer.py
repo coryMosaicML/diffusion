@@ -540,7 +540,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                                            conditioning_mask=caption_mask,
                                            constant_conditioning=pooled_text_embeddings)
         teacher_delta_t = (timesteps - timesteps_below) / 2
-        teacher_input = noised_inputs - teacher_1_out * teacher_delta_t
+        teacher_input = noised_inputs - teacher_1_out * teacher_delta_t.view(-1, 1, 1)
         teacher_2_out = self.teacher_model(teacher_input,
                                            latent_coords,
                                            timesteps - teacher_delta_t,
