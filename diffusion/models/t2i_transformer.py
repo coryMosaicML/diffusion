@@ -488,6 +488,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                          caption_key, caption_mask_key, pooled_embedding_features)
         self.teacher_model = teacher_model
         self.teacher_model.requires_grad_(False)
+        self.teacher_model._fsdp_wrap = False
         self.num_distillation_steps = num_distillation_steps
 
     def diffusion_forward_process(
