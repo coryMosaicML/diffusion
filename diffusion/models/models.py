@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from composer.devices import DeviceGPU
+from composer.utils import dist
+from composer.utils.file_helpers import get_file
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
 from peft import LoraConfig
 from torchmetrics import MeanSquaredError
@@ -20,7 +22,7 @@ from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttn
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.precomputed_text_latent_diffusion import PrecomputedTextLatentDiffusion
 from diffusion.models.stable_diffusion import StableDiffusion
-from diffusion.models.t2i_transformer import ComposerTextToImageMMDiT
+from diffusion.models.t2i_transformer import ComposerDistilledTextToImageMMDiT, ComposerTextToImageMMDiT
 from diffusion.models.text_encoder import MultiTextEncoder, MultiTokenizer
 from diffusion.models.transformer import DiffusionTransformer
 from diffusion.schedulers.schedulers import ContinuousTimeScheduler
@@ -34,6 +36,37 @@ except:
     is_xformers_installed = False
 
 log = logging.getLogger(__name__)
+
+
+def load_model(model, load_path: str, local_path: str = '/tmp/loaded_model_weights.pt', torch_dtype=None):
+    """Function to load a model weights from a composer checkpoint.
+
+    Args:
+        model (torch.nn.Module): Model to load the weights into.
+        load_path (str): Path to the composer checkpoint. Can be a local folder, URL, or composer object store.
+        local_path (str): Local path to save the weights to. Default: `/tmp/load_model_weights.pt`.
+        torch_dtype (torch.dtype): Torch dtype to cast the weights to. Default: `None`.
+
+    Returns:
+        model (torch.nn.Module): Model with weights loaded from the checkpoint.
+    """
+    # Download the weights and init them
+    if dist.get_local_rank() == 0:
+        get_file(path=load_path, destination=local_path, overwrite=True)
+    with dist.local_rank_zero_download_and_wait(local_path):
+        # Load the weights from the state dict
+        state_dict = torch.load(local_path, map_location='cpu')
+    # Need to clean up the state dict to remove loss and metrics.
+    cleaned_state_dict = {}
+    for key in list(state_dict['state']['model'].keys()):
+        if key.split('.')[0] == 'model':
+            cleaned_key = '.'.join(key.split('.')[1:])
+            cleaned_state_dict[cleaned_key] = state_dict['state']['model'][key]
+    # Load the cleaned state dict into the model
+    model.load_state_dict(cleaned_state_dict, strict=True)
+    if torch_dtype is not None:
+        model = model.to(dtype=torch_dtype)
+    return model
 
 
 def _parse_latent_statistics(latent_stat: Union[float, Tuple, str]) -> Union[float, Tuple, str]:
@@ -887,6 +920,8 @@ def text_to_image_transformer(
     vae_model_name: str = 'madebyollin/sdxl-vae-fp16-fix',
     autoencoder_path: Optional[str] = None,
     autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
+    teacher_path: Optional[str] = None,
+    num_distillation_steps: int = 25,
     num_layers: int = 28,
     max_image_side: int = 1280,
     conditioning_features: int = 768,
@@ -913,6 +948,8 @@ def text_to_image_transformer(
         autoencoder_path (optional, str): Path to autoencoder weights if using custom autoencoder. If not specified,
             will use the vae from `model_name`. Default `None`.
         autoencoder_local_path (optional, str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
+        teacher_path (optional, str): Path to the teacher model weights if doing distillation. Default: `None`.
+        num_distillation_steps (int): Number of distillation steps. Default: `25`.
         num_layers (int): Number of layers in the transformer. Number of heads and layer width are determined by
             this according to `num_features = 64 * num_layers`, and `num_heads = num_layers`. Default: `28`.
         max_image_side (int): Maximum side length of the image. Default: `1280`.
@@ -977,7 +1014,8 @@ def text_to_image_transformer(
     assert isinstance(latent_mean, tuple) and isinstance(latent_std, tuple)
     # Figure out the maximum input sequence length
     input_max_sequence_length = math.ceil(max_image_side / (downsample_factor * patch_size))
-    # Make the transformer model
+
+    # Make the transformer model. Use the distilled version if a teacher is provided
     transformer = DiffusionTransformer(num_features=64 * num_layers,
                                        num_heads=num_layers,
                                        num_layers=num_layers,
@@ -988,22 +1026,52 @@ def text_to_image_transformer(
                                        conditioning_max_sequence_length=conditioning_max_sequence_length,
                                        conditioning_dimension=1,
                                        expansion_factor=4)
-    # Make the composer model
-    model = ComposerTextToImageMMDiT(model=transformer,
-                                     autoencoder=vae,
-                                     text_encoder=text_encoder,
-                                     tokenizer=tokenizer,
-                                     latent_mean=latent_mean,
-                                     latent_std=latent_std,
-                                     patch_size=patch_size,
-                                     downsample_factor=downsample_factor,
-                                     latent_channels=autoencoder_channels,
-                                     timestep_mean=timestep_mean,
-                                     timestep_std=timestep_std,
-                                     timestep_shift=timestep_shift,
-                                     image_key=image_key,
-                                     caption_key=caption_key,
-                                     caption_mask_key=caption_mask_key)
+    if teacher_path is not None:
+        teacher_model = DiffusionTransformer(num_features=64 * num_layers,
+                                             num_heads=num_layers,
+                                             num_layers=num_layers,
+                                             input_features=autoencoder_channels * (patch_size**2),
+                                             input_max_sequence_length=input_max_sequence_length,
+                                             input_dimension=2,
+                                             conditioning_features=conditioning_features,
+                                             conditioning_max_sequence_length=conditioning_max_sequence_length,
+                                             conditioning_dimension=1,
+                                             expansion_factor=4)
+        teacher_model = load_model(teacher_model, teacher_path)
+        model = ComposerDistilledTextToImageMMDiT(model=transformer,
+                                                  teacher_model=teacher_model,
+                                                  autoencoder=vae,
+                                                  text_encoder=text_encoder,
+                                                  tokenizer=tokenizer,
+                                                  latent_mean=latent_mean,
+                                                  latent_std=latent_std,
+                                                  patch_size=patch_size,
+                                                  downsample_factor=downsample_factor,
+                                                  latent_channels=autoencoder_channels,
+                                                  timestep_mean=timestep_mean,
+                                                  timestep_std=timestep_std,
+                                                  timestep_shift=timestep_shift,
+                                                  image_key=image_key,
+                                                  caption_key=caption_key,
+                                                  caption_mask_key=caption_mask_key,
+                                                  num_distillation_steps=num_distillation_steps)
+    else:
+        # Make the composer model
+        model = ComposerTextToImageMMDiT(model=transformer,
+                                         autoencoder=vae,
+                                         text_encoder=text_encoder,
+                                         tokenizer=tokenizer,
+                                         latent_mean=latent_mean,
+                                         latent_std=latent_std,
+                                         patch_size=patch_size,
+                                         downsample_factor=downsample_factor,
+                                         latent_channels=autoencoder_channels,
+                                         timestep_mean=timestep_mean,
+                                         timestep_std=timestep_std,
+                                         timestep_shift=timestep_shift,
+                                         image_key=image_key,
+                                         caption_key=caption_key,
+                                         caption_mask_key=caption_mask_key)
 
     if torch.cuda.is_available():
         model = DeviceGPU().module_to_device(model)

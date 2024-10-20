@@ -457,3 +457,105 @@ class ComposerTextToImageMMDiT(ComposerModel):
         # Decode the latents
         image = self.decode_image(latent_patches, latent_coords)
         return image.detach()  # (batch*num_images_per_prompt, channel, h, w)
+
+
+class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
+    """ComposerModel for text to image with a distilled multimodal transformer."""
+
+    def __init__(
+        self,
+        model: DiffusionTransformer,
+        teacher_model: DiffusionTransformer,
+        autoencoder: torch.nn.Module,
+        text_encoder: torch.nn.Module,
+        tokenizer,
+        latent_mean: Optional[tuple[float]] = None,
+        latent_std: Optional[tuple[float]] = None,
+        patch_size: int = 2,
+        downsample_factor: int = 8,
+        latent_channels: int = 4,
+        timestep_mean: float = 0.0,
+        timestep_std: float = 1.0,
+        timestep_shift: float = 1.0,
+        image_key: str = 'image',
+        caption_key: str = 'caption',
+        caption_mask_key: str = 'caption_mask',
+        pooled_embedding_features: int = 768,
+        num_distillation_steps: int = 25,
+    ):
+        super().__init__(model, autoencoder, text_encoder, tokenizer, latent_mean, latent_std, patch_size,
+                         downsample_factor, latent_channels, timestep_mean, timestep_std, timestep_shift, image_key,
+                         caption_key, caption_mask_key, pooled_embedding_features)
+        self.teacher_model = teacher_model
+        self.teacher_model.requires_grad_(False)
+        self.num_distillation_steps = num_distillation_steps
+
+    def diffusion_forward_process(
+            self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Diffusion forward process using a rectified flow, restricted to a subset of timesteps."""
+        # Sample timesteps according to a logit-normal distribution
+        u = torch.linspace(1 / self.num_distillation_steps, 1, self.num_distillation_steps, device=inputs.device)
+        u_below = torch.linspace(0,
+                                 1 - 1 / self.num_distillation_steps,
+                                 self.num_distillation_steps,
+                                 device=inputs.device)
+        indices = torch.multinomial(torch.ones(self.num_distillation_steps), inputs.shape[0], replacement=True)
+        timesteps = u[indices].view(-1, 1, 1)
+        timesteps_below = u_below[indices].view(-1, 1, 1)
+        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
+        timesteps_below = self.timestep_shift * timesteps_below / (1 + (self.timestep_shift - 1) * timesteps_below)
+        # Then, add the noise to the latents according to the recitified flow
+        noise = torch.randn(*inputs.shape, device=inputs.device, generator=self.rng_generator)
+        noised_inputs = (1 - timesteps) * inputs + timesteps * noise
+        # Compute the targets, which are the velocities
+        targets = noise - inputs
+        return noised_inputs, targets, timesteps[:, 0, 0], timesteps_below[:, 0, 0]
+
+    def forward(self, batch):
+        # Get the inputs
+        image, caption, caption_mask = batch[self.image_key], batch[self.caption_key], batch[self.caption_mask_key]
+        # Get the image latents
+        latent_patches, latent_coords = self.encode_image(image)
+        # Get the text embeddings and their coords
+        text_embeddings, text_embeddings_coords, caption_mask, pooled_text_embeddings = self.embed_tokenized_prompts(
+            caption, caption_mask)
+        # Diffusion forward process
+        noised_inputs, targets, timesteps, timesteps_below = self.diffusion_forward_process(latent_patches)
+        # Forward through the student model
+        model_out = self.model(noised_inputs,
+                               latent_coords,
+                               timesteps,
+                               conditioning=text_embeddings,
+                               conditioning_coords=text_embeddings_coords,
+                               input_mask=None,
+                               conditioning_mask=caption_mask,
+                               constant_conditioning=pooled_text_embeddings)
+        # Do two steps of generation from the teacher model to make the targets
+        teacher_1_out = self.teacher_model(noised_inputs,
+                                           latent_coords,
+                                           timesteps,
+                                           conditioning=text_embeddings,
+                                           conditioning_coords=text_embeddings_coords,
+                                           input_mask=None,
+                                           conditioning_mask=caption_mask,
+                                           constant_conditioning=pooled_text_embeddings)
+        teacher_delta_t = (timesteps - timesteps_below) / 2
+        teacher_input = noised_inputs - teacher_1_out * teacher_delta_t
+        teacher_2_out = self.teacher_model(teacher_input,
+                                           latent_coords,
+                                           timesteps - teacher_delta_t,
+                                           conditioning=text_embeddings,
+                                           conditioning_coords=text_embeddings_coords,
+                                           input_mask=None,
+                                           conditioning_mask=caption_mask,
+                                           constant_conditioning=pooled_text_embeddings)
+        targets = (teacher_1_out + teacher_2_out) / 2
+
+        return {'predictions': model_out, 'targets': targets, 'timesteps': timesteps}
+
+    def make_sampling_timesteps(self, N: int):
+        timesteps = torch.linspace(1, 0, self.num_distillation_steps + 1)
+        timesteps = self.timestep_shift * timesteps / (1 + (self.timestep_shift - 1) * timesteps)
+        # Make timestep differences
+        delta_t = timesteps[:-1] - timesteps[1:]
+        return timesteps[:-1], delta_t
