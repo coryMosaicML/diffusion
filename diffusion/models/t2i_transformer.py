@@ -488,7 +488,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                          caption_key, caption_mask_key, pooled_embedding_features)
         self.teacher_model = teacher_model
         self.teacher_model.requires_grad_(False)
-        self.teacher_model._fsdp_wrap = False
+        self.teacher_model._fsdp_wrap = True
         # Need to turn off grad for the pooled embedding MLP because it isn't in the teacher.
         self.pooled_embedding_mlp.requires_grad_(False)
         self.num_distillation_steps = num_distillation_steps
