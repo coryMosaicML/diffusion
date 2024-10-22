@@ -523,7 +523,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         text_embeddings, text_embeddings_coords, caption_mask, pooled_text_embeddings = self.embed_tokenized_prompts(
             caption, caption_mask)
         # Diffusion forward process
-        noised_inputs, targets, timesteps, timesteps_below = self.diffusion_forward_process(latent_patches)
+        noised_inputs, _, timesteps, timesteps_below = self.diffusion_forward_process(latent_patches)
         # Forward through the student model
         model_out = self.model(noised_inputs,
                                latent_coords,
