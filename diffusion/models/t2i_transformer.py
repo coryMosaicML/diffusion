@@ -482,6 +482,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         caption_mask_key: str = 'caption_mask',
         pooled_embedding_features: int = 768,
         num_distillation_steps: int = 25,
+        num_teacher_steps: int = 2,
     ):
         super().__init__(model, autoencoder, text_encoder, tokenizer, latent_mean, latent_std, patch_size,
                          downsample_factor, latent_channels, timestep_mean, timestep_std, timestep_shift, image_key,
@@ -492,6 +493,7 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         # Need to turn off grad for the pooled embedding MLP because it isn't in the teacher.
         self.pooled_embedding_mlp.requires_grad_(False)
         self.num_distillation_steps = num_distillation_steps
+        self.num_teacher_steps = num_teacher_steps
 
     def diffusion_forward_process(
             self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -514,6 +516,31 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
         targets = noise - inputs
         return noised_inputs, targets, timesteps[:, 0, 0], timesteps_below[:, 0, 0]
 
+    @torch.no_grad()
+    def make_distillation_targets(self, noised_inputs: torch.Tensor, latent_coords: torch.Tensor,
+                                  timesteps: torch.Tensor, timesteps_below: torch.Tensor, text_embeddings: torch.Tensor,
+                                  text_embeddings_coords: torch.Tensor, caption_mask: torch.Tensor,
+                                  pooled_text_embeddings: torch.Tensor) -> torch.Tensor:
+        # Calculate the teacher timestep deltas. Note we're using equallty spaced timesteps for the teacher
+        # within the student's timestep deltas, which are not equallty spaced.
+        teacher_delta_t = (timesteps - timesteps_below) / self.num_teacher_steps
+        # Do N steps of generation from the teacher model to make the targets
+        teacher_input = noised_inputs
+        targets = torch.zeros_like(noised_inputs)
+        for i in range(self.num_teacher_steps):
+            teacher_timestep = timesteps - teacher_delta_t * i
+            teacher_out = self.teacher_model(teacher_input,
+                                             latent_coords,
+                                             teacher_timestep,
+                                             conditioning=text_embeddings,
+                                             conditioning_coords=text_embeddings_coords,
+                                             input_mask=None,
+                                             conditioning_mask=caption_mask,
+                                             constant_conditioning=pooled_text_embeddings)
+            teacher_input = noised_inputs - teacher_out * teacher_delta_t.view(-1, 1, 1)
+            targets += teacher_out.detach() / self.num_teacher_steps
+        return targets
+
     def forward(self, batch):
         # Get the inputs
         image, caption, caption_mask = batch[self.image_key], batch[self.caption_key], batch[self.caption_mask_key]
@@ -533,28 +560,10 @@ class ComposerDistilledTextToImageMMDiT(ComposerTextToImageMMDiT):
                                input_mask=None,
                                conditioning_mask=caption_mask,
                                constant_conditioning=pooled_text_embeddings)
-        # Do two steps of generation from the teacher model to make the targets
-        teacher_1_out = self.teacher_model(noised_inputs,
-                                           latent_coords,
-                                           timesteps,
-                                           conditioning=text_embeddings,
-                                           conditioning_coords=text_embeddings_coords,
-                                           input_mask=None,
-                                           conditioning_mask=caption_mask,
-                                           constant_conditioning=pooled_text_embeddings)
-        teacher_delta_t = (timesteps - timesteps_below) / 2
-        teacher_input = noised_inputs - teacher_1_out * teacher_delta_t.view(-1, 1, 1)
-        teacher_2_out = self.teacher_model(teacher_input,
-                                           latent_coords,
-                                           timesteps - teacher_delta_t,
-                                           conditioning=text_embeddings,
-                                           conditioning_coords=text_embeddings_coords,
-                                           input_mask=None,
-                                           conditioning_mask=caption_mask,
-                                           constant_conditioning=pooled_text_embeddings)
-        targets = (teacher_1_out + teacher_2_out) / 2
-        targets = targets.detach()
-
+        # Make distillation targets
+        targets = self.make_distillation_targets(noised_inputs, latent_coords, timesteps, timesteps_below,
+                                                 text_embeddings, text_embeddings_coords, caption_mask,
+                                                 pooled_text_embeddings)
         return {'predictions': model_out, 'targets': targets, 'timesteps': timesteps}
 
     def make_sampling_timesteps(self, N: int):
