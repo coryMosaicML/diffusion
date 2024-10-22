@@ -922,6 +922,7 @@ def text_to_image_transformer(
     autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
     teacher_path: Optional[str] = None,
     num_distillation_steps: int = 25,
+    num_teacher_steps: int = 2,
     num_layers: int = 28,
     max_image_side: int = 1280,
     conditioning_features: int = 768,
@@ -950,6 +951,7 @@ def text_to_image_transformer(
         autoencoder_local_path (optional, str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
         teacher_path (optional, str): Path to the teacher model weights if doing distillation. Default: `None`.
         num_distillation_steps (int): Number of distillation steps. Default: `25`.
+        num_teacher_steps (int): Number of teacher steps to use in distillation. Default: `2`.
         num_layers (int): Number of layers in the transformer. Number of heads and layer width are determined by
             this according to `num_features = 64 * num_layers`, and `num_heads = num_layers`. Default: `28`.
         max_image_side (int): Maximum side length of the image. Default: `1280`.
@@ -1054,7 +1056,8 @@ def text_to_image_transformer(
                                                   image_key=image_key,
                                                   caption_key=caption_key,
                                                   caption_mask_key=caption_mask_key,
-                                                  num_distillation_steps=num_distillation_steps)
+                                                  num_distillation_steps=num_distillation_steps,
+                                                  num_teacher_steps=num_teacher_steps)
     else:
         # Make the composer model
         model = ComposerTextToImageMMDiT(model=transformer,
