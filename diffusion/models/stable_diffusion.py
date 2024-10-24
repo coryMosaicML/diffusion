@@ -551,3 +551,232 @@ def _duplicate_tensor(tensor, num_images_per_prompt):
     return tensor.view(batch_size * num_images_per_prompt, seq_len, *[
         -1,
     ] * len(tensor.shape[2:]))
+
+
+class DistilledStableDiffusion(StableDiffusion):
+    """Distilled Stable Diffusion ComposerModel.
+
+    Args:
+        unet (torch.nn.Module): HuggingFace conditional unet, must accept a
+            (B, C, H, W) input, (B,) timestep array of noise timesteps,
+            and (B, 77, 768) text conditioning vectors.
+        teacher_unet (torch.nn.Module): Teacher unet model.
+        vae (torch.nn.Module): HuggingFace or compatible vae.
+            must support `.encode()` and `decode()` functions.
+        text_encoder (torch.nn.Module): HuggingFace CLIP or LLM text enoder.
+        tokenizer (transformers.PreTrainedTokenizer): Tokenizer used for
+            text_encoder. For a `CLIPTextModel` this will be the
+            `CLIPTokenizer` from HuggingFace transformers.
+        noise_scheduler (diffusers.SchedulerMixin): HuggingFace diffusers
+            noise scheduler. Used during the forward diffusion process (training).
+        inference_scheduler (diffusers.SchedulerMixin): HuggingFace diffusers
+            noise scheduler. Used during the backward diffusion process (inference).
+        num_images_per_prompt (int): How many images to generate per prompt
+            for evaluation. Default: `1`.
+        loss_fn (torch.nn.Module): torch loss function. Default: `F.mse_loss`.
+        prediction_type (str): The type of prediction to use. Must be one of 'sample',
+            'epsilon', or 'v_prediction'. Default: `epsilon`.
+        latent_mean (Optional[tuple[float]]): The means of the latent space. If not specified, defaults to
+            4 * (0.0,). Default: `None`.
+        latent_std (Optional[tuple[float]]): The standard deviations of the latent space. If not specified,
+            defaults to 4 * (1/0.13025,) for SDXL, or 4 * (1/0.18215,) for non-SDXL. Default: `None`.
+        downsample_factor (int): The factor by which the image is downsampled by the autoencoder. Default `8`.
+        offset_noise (float, optional): The scale of the offset noise. If not specified, offset noise will not
+            be used. Default `None`.
+        train_metrics (list): List of torchmetrics to calculate during training.
+            Default: `None`.
+        val_metrics (list): List of torchmetrics to calculate during validation.
+            Default: `None`.
+        quasirandomness (bool): Whether to use quasirandomness for generating diffusion process noise.
+            Default: `False`.
+        train_seed (int): Seed to use for generating diffusion process noise during training if using
+            quasirandomness. Default: `42`.
+        val_seed (int): Seed to use for generating eval images. Default: `1138`.
+        image_key (str): The name of the image inputs in the dataloader batch.
+            Default: `image_tensor`.
+        caption_key (str): The name of the caption inputs in the dataloader batch.
+            Default: `input_ids`.
+        fsdp (bool): whether to use FSDP, Default: `False`.
+        image_latents_key (str): key in batch dict for image latents.
+            Default: `image_latents`.
+        text_latents_key (str): key in batch dict for text latent.
+            Default: `caption_latents`.
+        precomputed_latents: whether to use precomputed latents.
+            Default: `False`.
+        encode_latents_in_fp16 (bool): whether to encode latents in fp16.
+            Default: `False`.
+        mask_pad_tokens (bool): whether to mask pad tokens in unet cross attention.
+            Default: `False`.
+        sdxl (bool): Whether or not we're training SDXL. Default: `False`.
+        num_distillation_steps (int): Number of distillation steps. Default: `25`.
+        num_teacher_steps (int): Number of teacher steps. Default: `2`.
+    """
+
+    def __init__(
+        self,
+        unet,
+        teacher_unet,
+        vae,
+        text_encoder,
+        tokenizer,
+        noise_scheduler,
+        inference_noise_scheduler,
+        loss_fn=F.mse_loss,
+        prediction_type: str = 'epsilon',
+        latent_mean: Optional[Tuple[float]] = None,
+        latent_std: Optional[Tuple[float]] = None,
+        downsample_factor: int = 8,
+        offset_noise: Optional[float] = None,
+        train_metrics: Optional[List] = None,
+        val_metrics: Optional[List] = None,
+        quasirandomness: bool = False,
+        train_seed: int = 42,
+        val_seed: int = 1138,
+        image_key: str = 'image',
+        text_key: str = 'captions',
+        image_latents_key: str = 'image_latents',
+        text_latents_key: str = 'caption_latents',
+        precomputed_latents: bool = False,
+        encode_latents_in_fp16: bool = False,
+        mask_pad_tokens: bool = False,
+        fsdp: bool = False,
+        sdxl: bool = False,
+        num_distillation_steps: int = 25,
+        num_teacher_steps: int = 2,
+    ):
+        super().__init__(unet, vae, text_encoder, tokenizer, noise_scheduler, inference_noise_scheduler, loss_fn,
+                         prediction_type, latent_mean, latent_std, downsample_factor, offset_noise, train_metrics,
+                         val_metrics, quasirandomness, train_seed, val_seed, image_key, text_key, image_latents_key,
+                         text_latents_key, precomputed_latents, encode_latents_in_fp16, mask_pad_tokens, fsdp, sdxl)
+        self.teacher_unet = teacher_unet
+        self.num_distillation_steps = num_distillation_steps
+        self.num_teacher_steps = num_teacher_steps
+        self.teacher_model.requires_grad_(False)
+        self.teacher_model._fsdp_wrap = True
+
+    def _generate_timesteps(self, latents: torch.Tensor):
+        if self.quasirandomness:
+            raise NotImplementedError('Quasirandomness not yet supported with distillation')
+        else:
+            step_interval = len(self.noise_scheduler) // self.num_distillation_steps
+            distillation_steps = torch.arange(0, len(self.noise_scheduler), step=step_interval, device=latents.device)
+            indices = torch.randint(0,
+                                    len(distillation_steps), (latents.shape[0],),
+                                    generator=self.rng_generator,
+                                    device=latents.device)
+            timesteps = distillation_steps[indices]
+        return timesteps
+
+    @torch.no_grad()
+    def make_distillation_targets(self,
+                                  noised_latents,
+                                  timesteps,
+                                  text_embeds,
+                                  encoder_attention_mask=None,
+                                  added_cond_kwargs=None):
+        teacher_input = noised_latents
+        step_interval = len(self.noise_scheduler) // (self.num_distillation_steps // self.num_teacher_steps)
+        for _ in range(self.num_teacher_steps):
+            teacher_output = self.teacher_unet(teacher_input,
+                                               timesteps,
+                                               text_embeds,
+                                               encoder_attention_mask=encoder_attention_mask,
+                                               added_cond_kwargs=added_cond_kwargs)['sample']
+            # Single step of DDIM
+            if self.prediction_type == 'epsilon':
+                alpha_bars = self.noise_scheduler.alpha_cumprod[timesteps]
+                noise_pred = teacher_output
+                latent_pred = (teacher_input - torch.sqrt(1 - alpha_bars) * noise_pred) / torch.sqrt(alpha_bars)
+                timesteps = timesteps - step_interval
+                next_alpha_bars = self.noise_scheduler.alpha_cumprod[timesteps]
+                teacher_input = torch.sqrt(next_alpha_bars) * latent_pred + torch.sqrt(1 - next_alpha_bars) * noise_pred
+            elif self.prediction_type == 'sample':
+                raise NotImplementedError('Distillation not yet supported with prediction_type=sample')
+            elif self.prediction_type == 'v_prediction':
+                raise NotImplementedError('Distillation not yet supported with prediction_type=v_prediction')
+            else:
+                raise ValueError(
+                    f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
+        if self.prediction_type == 'epsilon':
+            alpha_bar_before = self.noise_scheduler.alpha_cumprod[timesteps]
+            alpha_bar_after = self.noise_scheduler.alpha_cumprod[timesteps - step_interval * self.num_teacher_steps]
+            sigmas = torch.sqrt(alpha_bar_after / alpha_bar_before)
+            targets = (teacher_input - sigmas * noised_latents) / (torch.sqrt(sigmas * (1 - alpha_bar_before)) +
+                                                                   torch.sqrt(1 - alpha_bar_after))
+        else:
+            raise ValueError(
+                f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
+        return targets
+
+    def forward(self, batch):
+        latents, text_embeds, text_pooled_embeds, attention_mask, encoder_attention_mask = None, None, None, None, None
+        if 'attention_mask' in batch and self.mask_pad_tokens:
+            attention_mask = batch['attention_mask']  # mask for text encoders
+            encoder_attention_mask = _create_unet_attention_mask(attention_mask)  # text mask for U-Net
+
+        # Use latents if specified and available. When specified, they might not exist during eval
+        if self.precomputed_latents and self.image_latents_key in batch and self.text_latents_key in batch:
+            if self.sdxl:
+                raise NotImplementedError('SDXL not yet supported with precomputed latents')
+            latents, text_embeds = batch[self.image_latents_key], batch[self.text_latents_key]
+        else:
+            inputs, conditionings = batch[self.image_key], batch[self.text_key]
+
+            # If encode_latents_in_fp16, disable autocast context as models are in fp16
+            c = torch.cuda.amp.autocast(enabled=False) if self.encode_latents_in_fp16 else nullcontext()  # type: ignore
+            with c:
+                # Encode the images to the latent space.
+                if self.encode_latents_in_fp16:
+                    latents = self.vae.encode(inputs.half())['latent_dist'].sample().data
+                else:
+                    latents = self.vae.encode(inputs)['latent_dist'].sample().data
+                # Encode tokenized prompt into embedded text and pooled text embeddings
+                text_encoder_out = self.text_encoder(conditionings, attention_mask=attention_mask)
+                text_embeds = text_encoder_out[0]
+                if self.sdxl:
+                    if len(text_encoder_out) <= 1:
+                        raise RuntimeError('SDXL requires text encoder output to include a pooled text embedding')
+                    text_pooled_embeds = text_encoder_out[1]
+
+        # Scale the latents
+        latents = (latents - self.latent_mean) / self.latent_std
+
+        # Zero dropped captions if needed
+        if 'drop_caption_mask' in batch.keys():
+            text_embeds *= batch['drop_caption_mask'].view(-1, 1, 1)
+            if text_pooled_embeds is not None:
+                text_pooled_embeds *= batch['drop_caption_mask'].view(-1, 1)
+
+        # Sample the diffusion timesteps
+        timesteps = self._generate_timesteps(latents)
+        # Add noise to the inputs (forward diffusion)
+        noise = torch.randn(*latents.shape, device=latents.device, generator=self.rng_generator)
+        if self.offset_noise is not None:
+            offset_noise = torch.randn(latents.shape[0],
+                                       latents.shape[1],
+                                       1,
+                                       1,
+                                       device=noise.device,
+                                       generator=self.rng_generator)
+            noise += self.offset_noise * offset_noise
+        noised_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+
+        added_cond_kwargs = {}
+        # if using SDXL, prepare added time ids & embeddings
+        if self.sdxl:
+            add_time_ids = torch.cat(
+                [batch['cond_original_size'], batch['cond_crops_coords_top_left'], batch['cond_target_size']], dim=1)
+            added_cond_kwargs = {'text_embeds': text_pooled_embeds, 'time_ids': add_time_ids}
+
+        # Generate the targets
+        targets = self.make_distillation_targets(noised_latents,
+                                                 timesteps,
+                                                 text_embeds,
+                                                 encoder_attention_mask=encoder_attention_mask,
+                                                 added_cond_kwargs=added_cond_kwargs)
+        # Forward through the model
+        return self.unet(noised_latents,
+                         timesteps,
+                         text_embeds,
+                         encoder_attention_mask=encoder_attention_mask,
+                         added_cond_kwargs=added_cond_kwargs)['sample'], targets, timesteps

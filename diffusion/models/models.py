@@ -21,7 +21,7 @@ from diffusion.models.autoencoder import (AutoEncoder, AutoEncoderLoss, Composer
 from diffusion.models.layers import ClippedAttnProcessor2_0, ClippedXFormersAttnProcessor, zero_module
 from diffusion.models.pixel_diffusion import PixelDiffusion
 from diffusion.models.precomputed_text_latent_diffusion import PrecomputedTextLatentDiffusion
-from diffusion.models.stable_diffusion import StableDiffusion
+from diffusion.models.stable_diffusion import DistilledStableDiffusion, StableDiffusion
 from diffusion.models.t2i_transformer import ComposerDistilledTextToImageMMDiT, ComposerTextToImageMMDiT
 from diffusion.models.text_encoder import MultiTextEncoder, MultiTokenizer
 from diffusion.models.transformer import DiffusionTransformer
@@ -38,7 +38,11 @@ except:
 log = logging.getLogger(__name__)
 
 
-def load_model(model, load_path: str, local_path: str = '/tmp/loaded_model_weights.pt', torch_dtype=None):
+def load_model(model,
+               load_path: str,
+               model_key: str = 'model',
+               local_path: str = '/tmp/loaded_model_weights.pt',
+               torch_dtype=None):
     """Function to load a model weights from a composer checkpoint.
 
     Args:
@@ -59,7 +63,7 @@ def load_model(model, load_path: str, local_path: str = '/tmp/loaded_model_weigh
     # Need to clean up the state dict to remove loss and metrics.
     cleaned_state_dict = {}
     for key in list(state_dict['state']['model'].keys()):
-        if key.split('.')[0] == 'model':
+        if key.split('.')[0] == model_key:
             cleaned_key = '.'.join(key.split('.')[1:])
             cleaned_state_dict[cleaned_key] = state_dict['state']['model'][key]
     # Load the cleaned state dict into the model
@@ -77,6 +81,30 @@ def _parse_latent_statistics(latent_stat: Union[float, Tuple, str]) -> Union[flo
     elif type(latent_stat).__name__ == 'ListConfig' and not isinstance(latent_stat, float):
         latent_stat = tuple(latent_stat)
     return latent_stat
+
+
+def _unet_fsdp_wrap(unet):
+    assert isinstance(unet, UNet2DConditionModel)
+    if hasattr(unet, 'mid_block') and unet.mid_block is not None:
+        for attention in unet.mid_block.attentions:
+            attention._fsdp_wrap = True
+        for resnet in unet.mid_block.resnets:
+            resnet._fsdp_wrap = True
+    for block in unet.up_blocks:
+        if hasattr(block, 'attentions'):
+            for attention in block.attentions:
+                attention._fsdp_wrap = True
+        if hasattr(block, 'resnets'):
+            for resnet in block.resnets:
+                resnet._fsdp_wrap = True
+    for block in unet.down_blocks:
+        if hasattr(block, 'attentions'):
+            for attention in block.attentions:
+                attention._fsdp_wrap = True
+        if hasattr(block, 'resnets'):
+            for resnet in block.resnets:
+                resnet._fsdp_wrap = True
+    return unet
 
 
 def stable_diffusion_2(
@@ -316,6 +344,9 @@ def stable_diffusion_xl(
     pretrained: bool = True,
     autoencoder_path: Optional[str] = None,
     autoencoder_local_path: str = '/tmp/autoencoder_weights.pt',
+    teacher_path: Optional[str] = None,
+    num_distillation_steps: int = 25,
+    num_teacher_steps: int = 2,
     prediction_type: str = 'epsilon',
     latent_mean: Union[float, Tuple, str] = 0.0,
     latent_std: Union[float, Tuple, str] = 7.67754318618,
@@ -361,6 +392,9 @@ def stable_diffusion_xl(
         autoencoder_path (optional, str): Path to autoencoder weights if using custom autoencoder. If not specified,
             will use the vae from `model_name`. Default `None`.
         autoencoder_local_path (optional, str): Path to autoencoder weights. Default: `/tmp/autoencoder_weights.pt`.
+        teacher_path (optional, str): Path to the teacher model weights if doing distillation. Default: `None`.
+        num_distillation_steps (int): Number of distillation steps. Default: `25`.
+        num_teacher_steps (int): Number of teacher steps. Default: `2`.
         prediction_type (str): The type of prediction to use. Must be one of 'sample',
             'epsilon', or 'v_prediction'. Default: `epsilon`.
         latent_mean (float, Tuple, str): The mean of the autoencoder latents. Either a float for a single value,
@@ -454,7 +488,7 @@ def stable_diffusion_xl(
         # This config variable is the sum of the text encoder projection dimension and
         # the number of additional time embeddings (6) * addition_time_embed_dim (256)
         unet_config['projection_class_embeddings_input_dim'] = text_encoder.text_encoder_proj_dim + 1536
-        # Init the unet from the config
+        # Init the unet(s) from the config
         unet = UNet2DConditionModel(**unet_config)
 
         # Zero initialization trick
@@ -473,26 +507,7 @@ def stable_diffusion_xl(
         latent_std = (latent_std,) * unet_config['in_channels']
     assert isinstance(latent_mean, tuple) and isinstance(latent_std, tuple)
 
-    assert isinstance(unet, UNet2DConditionModel)
-    if hasattr(unet, 'mid_block') and unet.mid_block is not None:
-        for attention in unet.mid_block.attentions:
-            attention._fsdp_wrap = True
-        for resnet in unet.mid_block.resnets:
-            resnet._fsdp_wrap = True
-    for block in unet.up_blocks:
-        if hasattr(block, 'attentions'):
-            for attention in block.attentions:
-                attention._fsdp_wrap = True
-        if hasattr(block, 'resnets'):
-            for resnet in block.resnets:
-                resnet._fsdp_wrap = True
-    for block in unet.down_blocks:
-        if hasattr(block, 'attentions'):
-            for attention in block.attentions:
-                attention._fsdp_wrap = True
-        if hasattr(block, 'resnets'):
-            for resnet in block.resnets:
-                resnet._fsdp_wrap = True
+    unet = _unet_fsdp_wrap(unet)
 
     # Make the noise schedulers
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000,
@@ -539,29 +554,62 @@ def stable_diffusion_xl(
                                                      shift_dim=scheduler_shift_resolution // downsample_factor)
 
     # Make the composer model
-    model = StableDiffusion(
-        unet=unet,
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=tokenizer,
-        noise_scheduler=noise_scheduler,
-        inference_noise_scheduler=inference_noise_scheduler,
-        prediction_type=prediction_type,
-        latent_mean=latent_mean,
-        latent_std=latent_std,
-        downsample_factor=downsample_factor,
-        offset_noise=offset_noise,
-        train_metrics=train_metrics,
-        val_metrics=val_metrics,
-        quasirandomness=quasirandomness,
-        train_seed=train_seed,
-        val_seed=val_seed,
-        precomputed_latents=precomputed_latents,
-        encode_latents_in_fp16=encode_latents_in_fp16,
-        mask_pad_tokens=mask_pad_tokens,
-        fsdp=fsdp,
-        sdxl=True,
-    )
+    if teacher_path is not None:
+        teacher_unet = UNet2DConditionModel(**unet_config)
+        teacher_unet = _unet_fsdp_wrap(teacher_unet)
+        # Load the teacher model
+        teacher_unet = load_model(teacher_unet, teacher_path, model_key='unet')
+
+        model = DistilledStableDiffusion(
+            unet=unet,
+            teacher_unet=teacher_unet,
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            noise_scheduler=noise_scheduler,
+            inference_noise_scheduler=inference_noise_scheduler,
+            prediction_type=prediction_type,
+            latent_mean=latent_mean,
+            latent_std=latent_std,
+            downsample_factor=downsample_factor,
+            offset_noise=offset_noise,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            quasirandomness=quasirandomness,
+            train_seed=train_seed,
+            val_seed=val_seed,
+            precomputed_latents=precomputed_latents,
+            encode_latents_in_fp16=encode_latents_in_fp16,
+            mask_pad_tokens=mask_pad_tokens,
+            fsdp=fsdp,
+            sdxl=True,
+            num_distillation_steps=num_distillation_steps,
+            num_teacher_steps=num_teacher_steps,
+        )
+    else:
+        model = StableDiffusion(
+            unet=unet,
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            noise_scheduler=noise_scheduler,
+            inference_noise_scheduler=inference_noise_scheduler,
+            prediction_type=prediction_type,
+            latent_mean=latent_mean,
+            latent_std=latent_std,
+            downsample_factor=downsample_factor,
+            offset_noise=offset_noise,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            quasirandomness=quasirandomness,
+            train_seed=train_seed,
+            val_seed=val_seed,
+            precomputed_latents=precomputed_latents,
+            encode_latents_in_fp16=encode_latents_in_fp16,
+            mask_pad_tokens=mask_pad_tokens,
+            fsdp=fsdp,
+            sdxl=True,
+        )
 
     if lora_rank is not None:
         assert lora_alpha is not None
