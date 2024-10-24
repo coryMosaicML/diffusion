@@ -651,8 +651,8 @@ class DistilledStableDiffusion(StableDiffusion):
         self.teacher_unet = teacher_unet
         self.num_distillation_steps = num_distillation_steps
         self.num_teacher_steps = num_teacher_steps
-        self.teacher_model.requires_grad_(False)
-        self.teacher_model._fsdp_wrap = True
+        self.teacher_unet.requires_grad_(False)
+        self.teacher_unet._fsdp_wrap = True
 
     def _generate_timesteps(self, latents: torch.Tensor):
         if self.quasirandomness:
