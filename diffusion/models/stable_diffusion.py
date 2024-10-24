@@ -684,11 +684,11 @@ class DistilledStableDiffusion(StableDiffusion):
                                                added_cond_kwargs=added_cond_kwargs)['sample']
             # Single step of DDIM
             if self.prediction_type == 'epsilon':
-                alpha_bars = self.noise_scheduler.alpha_cumprod[timesteps]
+                alpha_bars = self.noise_scheduler.alphas_cumprod[timesteps]
                 noise_pred = teacher_output
                 latent_pred = (teacher_input - torch.sqrt(1 - alpha_bars) * noise_pred) / torch.sqrt(alpha_bars)
                 timesteps = timesteps - step_interval
-                next_alpha_bars = self.noise_scheduler.alpha_cumprod[timesteps]
+                next_alpha_bars = self.noise_scheduler.alphas_cumprod[timesteps]
                 teacher_input = torch.sqrt(next_alpha_bars) * latent_pred + torch.sqrt(1 - next_alpha_bars) * noise_pred
             elif self.prediction_type == 'sample':
                 raise NotImplementedError('Distillation not yet supported with prediction_type=sample')
@@ -698,8 +698,8 @@ class DistilledStableDiffusion(StableDiffusion):
                 raise ValueError(
                     f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
         if self.prediction_type == 'epsilon':
-            alpha_bar_before = self.noise_scheduler.alpha_cumprod[timesteps]
-            alpha_bar_after = self.noise_scheduler.alpha_cumprod[timesteps - step_interval * self.num_teacher_steps]
+            alpha_bar_before = self.noise_scheduler.alphas_cumprod[timesteps]
+            alpha_bar_after = self.noise_scheduler.alphas_cumprod[timesteps - step_interval * self.num_teacher_steps]
             sigmas = torch.sqrt(alpha_bar_after / alpha_bar_before)
             targets = (teacher_input - sigmas * noised_latents) / (torch.sqrt(sigmas * (1 - alpha_bar_before)) +
                                                                    torch.sqrt(1 - alpha_bar_after))
