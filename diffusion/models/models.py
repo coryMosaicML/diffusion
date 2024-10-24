@@ -555,10 +555,13 @@ def stable_diffusion_xl(
 
     # Make the composer model
     if teacher_path is not None:
-        teacher_unet = UNet2DConditionModel(**unet_config)
-        teacher_unet = _unet_fsdp_wrap(teacher_unet)
         # Load the teacher model
-        teacher_unet = load_model(teacher_unet, teacher_path, model_key='unet')
+        if pretrained:
+            teacher_unet = UNet2DConditionModel.from_pretrained(unet_model_name, subfolder='unet')
+        else:
+            teacher_unet = UNet2DConditionModel(**unet_config)
+            teacher_unet = load_model(teacher_unet, teacher_path, model_key='unet')
+        teacher_unet = _unet_fsdp_wrap(teacher_unet)
 
         model = DistilledStableDiffusion(
             unet=unet,

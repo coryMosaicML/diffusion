@@ -659,7 +659,7 @@ class DistilledStableDiffusion(StableDiffusion):
             raise NotImplementedError('Quasirandomness not yet supported with distillation')
         else:
             step_interval = len(self.noise_scheduler) // self.num_distillation_steps
-            distillation_steps = torch.arange(0, len(self.noise_scheduler), step=step_interval, device=latents.device)
+            distillation_steps = torch.arange(1, len(self.noise_scheduler), step=step_interval, device=latents.device)
             indices = torch.randint(0,
                                     len(distillation_steps), (latents.shape[0],),
                                     generator=self.rng_generator,
@@ -670,25 +670,27 @@ class DistilledStableDiffusion(StableDiffusion):
     @torch.no_grad()
     def make_distillation_targets(self,
                                   noised_latents,
+                                  noise,
                                   timesteps,
                                   text_embeds,
                                   encoder_attention_mask=None,
                                   added_cond_kwargs=None):
         teacher_input = noised_latents
-        step_interval = len(self.noise_scheduler) // (self.num_distillation_steps // self.num_teacher_steps)
+        timesteps_teacher = timesteps
+        step_interval = len(self.noise_scheduler) // (self.num_distillation_steps * self.num_teacher_steps)
         for _ in range(self.num_teacher_steps):
             teacher_output = self.teacher_unet(teacher_input,
-                                               timesteps,
+                                               timesteps_teacher,
                                                text_embeds,
                                                encoder_attention_mask=encoder_attention_mask,
                                                added_cond_kwargs=added_cond_kwargs)['sample']
             # Single step of DDIM
             if self.prediction_type == 'epsilon':
-                alpha_bars = self.noise_scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1)
+                alpha_bars = self.noise_scheduler.alphas_cumprod[timesteps_teacher].view(-1, 1, 1, 1)
                 noise_pred = teacher_output
                 latent_pred = (teacher_input - torch.sqrt(1 - alpha_bars) * noise_pred) / torch.sqrt(alpha_bars)
-                timesteps = timesteps - step_interval
-                next_alpha_bars = self.noise_scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1)
+                timesteps_teacher = timesteps_teacher - step_interval
+                next_alpha_bars = self.noise_scheduler.alphas_cumprod[timesteps_teacher].view(-1, 1, 1, 1)
                 teacher_input = torch.sqrt(next_alpha_bars) * latent_pred + torch.sqrt(1 - next_alpha_bars) * noise_pred
             elif self.prediction_type == 'sample':
                 raise NotImplementedError('Distillation not yet supported with prediction_type=sample')
@@ -699,12 +701,14 @@ class DistilledStableDiffusion(StableDiffusion):
                     f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
         if self.prediction_type == 'epsilon':
             alpha_bar_before = self.noise_scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1)
-            alpha_bar_after = self.noise_scheduler.alphas_cumprod[timesteps -
-                                                                  step_interval * self.num_teacher_steps].view(
-                                                                      -1, 1, 1, 1)
+            timesteps_end = timesteps - step_interval * self.num_teacher_steps
+            alpha_bar_after = self.noise_scheduler.alphas_cumprod[timesteps_end].view(-1, 1, 1, 1)
             sigmas = torch.sqrt(alpha_bar_after / alpha_bar_before)
             targets = (teacher_input - sigmas * noised_latents) / (torch.sqrt(sigmas * (1 - alpha_bar_before)) +
                                                                    torch.sqrt(1 - alpha_bar_after))
+            # For the last timestep, we need to use the original targets
+            negative_mask = timesteps_end < 0
+            targets[negative_mask] = noise[negative_mask]
         else:
             raise ValueError(
                 f'prediction type must be one of sample, epsilon, or v_prediction. Got {self.prediction_type}')
@@ -772,6 +776,7 @@ class DistilledStableDiffusion(StableDiffusion):
 
         # Generate the targets
         targets = self.make_distillation_targets(noised_latents,
+                                                 noise,
                                                  timesteps,
                                                  text_embeds,
                                                  encoder_attention_mask=encoder_attention_mask,
