@@ -703,9 +703,9 @@ class DistilledStableDiffusion(StableDiffusion):
             alpha_bar_before = self.noise_scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1)
             timesteps_end = timesteps - step_interval * self.num_teacher_steps
             alpha_bar_after = self.noise_scheduler.alphas_cumprod[timesteps_end].view(-1, 1, 1, 1)
-            sigmas = torch.sqrt(alpha_bar_after / alpha_bar_before)
-            targets = (teacher_input - sigmas * noised_latents) / (torch.sqrt(sigmas * (1 - alpha_bar_before)) +
-                                                                   torch.sqrt(1 - alpha_bar_after))
+            sqrt_ratio = torch.sqrt(alpha_bar_after / alpha_bar_before)
+            targets = (teacher_input - sqrt_ratio * noised_latents) / (torch.sqrt(1 - alpha_bar_after) -
+                                                                       torch.sqrt(sqrt_ratio * (1 - alpha_bar_before)))
             # For the last timestep, we need to use the original targets
             negative_mask = timesteps_end < 0
             targets[negative_mask] = noise[negative_mask]
