@@ -610,6 +610,7 @@ def precomputed_text_latent_diffusion(
     val_seed: int = 1138,
     fsdp: bool = True,
     use_xformers: bool = True,
+    best_of_n: Optional[int] = None,
     lora_rank: Optional[int] = None,
     lora_alpha: Optional[int] = None,
 ):
@@ -660,6 +661,8 @@ def precomputed_text_latent_diffusion(
         val_seed (int): Seed to use for generating evaluation images. Defaults to 1138.
         fsdp (bool): Whether to use FSDP. Defaults to True.
         use_xformers (bool): Whether to use xformers for attention. Defaults to True.
+        best_of_n (int, optional): Optional N value for best of N inference. If not specified, will not
+            do best of N. Defaults to None.
         lora_rank (int, optional): If not None, the rank to use for LoRA finetuning. Defaults to None.
         lora_alpha (int, optional): If not None, the alpha to use for LoRA finetuning. Defaults to None.
     """
@@ -814,6 +817,7 @@ def precomputed_text_latent_diffusion(
         t5_encoder=t5_encoder,
         clip_tokenizer=clip_tokenizer,
         clip_encoder=clip_encoder,
+        best_of_n=best_of_n,
         noise_scheduler=noise_scheduler,
         inference_noise_scheduler=inference_noise_scheduler,
         prediction_type=prediction_type,
