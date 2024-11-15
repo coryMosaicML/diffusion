@@ -13,6 +13,7 @@ from composer.models import ComposerModel
 from composer.utils import dist
 from scipy.stats import qmc
 from torchmetrics import MeanSquaredError
+from torchmetrics.multimodal import CLIPScore
 from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizer
 
@@ -80,6 +81,7 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
         t5_encoder: Optional[torch.nn.Module] = None,
         clip_tokenizer: Optional[PreTrainedTokenizer] = None,
         clip_encoder: Optional[torch.nn.Module] = None,
+        best_of_n: Optional[int] = None,
         text_embed_dim: int = 4096,
         prediction_type: str = 'epsilon',
         image_key: str = 'image',
@@ -138,6 +140,11 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
         self.rng_generator: Optional[torch.Generator] = None
         if self.quasirandomness:
             self.sobol = qmc.Sobol(d=1, scramble=True, seed=self.train_seed)
+
+        # Optionally set up for best-of-N inference
+        self.best_of_n = best_of_n
+        if best_of_n is not None:
+            self.clip_score = CLIPScore()
 
         # Projection layers for the text embeddings
         self.clip_proj = nn.Linear(768, text_embed_dim)
@@ -410,6 +417,8 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
             raise ValueError('neg_prompt_mask should be provided if and only if using embeddings')
         if (pooled_neg_prompt is None) != (neg_prompt_embeds is None):
             raise ValueError('pooled_neg_prompt should be provided if and only if using embeddings')
+        if self.best_of_n is not None and prompt is None:
+            raise ValueError('Need to supply text prompts when using best-of-N.')
 
         # If the prompt is specified as text, encode it.
         if prompt is not None:
@@ -423,6 +432,9 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
                 negative_prompt, self.vae.device)
             neg_prompt_embeds, neg_prompt_mask = self.prepare_text_embeddings(t5_embed, clip_embed, t5_attn_mask,
                                                                               clip_attn_mask)
+        # Need to generate even more images if doing best of n
+        if self.best_of_n is not None:
+            num_images_per_prompt *= self.best_of_n
 
         text_embeddings = _duplicate_tensor(prompt_embeds, num_images_per_prompt)
         pooled_embeddings = _duplicate_tensor(pooled_prompt, num_images_per_prompt)
@@ -503,7 +515,21 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
         # We now use the vae to decode the generated latents back into the image.
         # scale and decode the image latents with vae
         image = self.decode_latents(latents)
-        return image.detach().float()  # (batch*num_images_per_prompt, channel, h, w)
+        # Choose the best image
+        if self.best_of_n is not None:
+            assert prompt is not None
+            self.clip_score = self.clip_score.to(image.device)
+            num_prompts = len(prompt)
+            best_imgs = []
+            imgs_per_prompt = torch.split(image, num_prompts, dim=0)
+            for i, prompt_imgs in enumerate(imgs_per_prompt):
+                scores = [self.clip_score((img * 255).to(torch.uint8), prompt[i]) for img in prompt_imgs]
+                best_n_indices = torch.topk(torch.tensor(scores), self.best_of_n).indices
+                best_imgs.append(prompt_imgs[best_n_indices])
+            best_imgs = torch.cat(best_imgs, dim=0)
+            return best_imgs.detach().float()
+        else:
+            return image.detach().float()  # (batch*num_images_per_prompt, channel, h, w)
 
 
 def _duplicate_tensor(tensor, num_images_per_prompt):
