@@ -519,12 +519,12 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
         if self.best_of_n is not None:
             assert prompt is not None
             self.clip_score = self.clip_score.to(image.device)
-            num_prompts = len(prompt)
             best_imgs = []
-            imgs_per_prompt = torch.split(image, num_prompts, dim=0)
+            imgs_per_prompt = torch.split(image, num_images_per_prompt, dim=0)
             for i, prompt_imgs in enumerate(imgs_per_prompt):
                 scores = [self.clip_score((img * 255).to(torch.uint8), prompt[i]) for img in prompt_imgs]
-                best_n_indices = torch.topk(torch.tensor(scores), self.best_of_n).indices
+                print(scores)
+                best_n_indices = torch.topk(torch.tensor(scores), num_images_per_prompt // self.best_of_n).indices
                 best_imgs.append(prompt_imgs[best_n_indices])
             best_imgs = torch.cat(best_imgs, dim=0)
             return best_imgs.detach().float()
