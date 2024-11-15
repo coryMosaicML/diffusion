@@ -476,8 +476,12 @@ class PrecomputedTextLatentDiffusion(ComposerModel):
 
         if crop_params is None:
             crop_params = torch.zeros((batch_size, 2), dtype=text_embeddings.dtype)
+        else:
+            crop_params = _duplicate_tensor(crop_params, num_images_per_prompt)
         if input_size_params is None:
             input_size_params = torch.tensor([[width, height]] * batch_size, dtype=text_embeddings.dtype)
+        else:
+            input_size_params = _duplicate_tensor(input_size_params, num_images_per_prompt)
         output_size_params = torch.tensor([[width, height]] * batch_size, dtype=text_embeddings.dtype)
 
         crop_params = torch.cat([crop_params, crop_params])
