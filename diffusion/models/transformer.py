@@ -220,7 +220,7 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
         # Native torch attention
-        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)  # (B, H, T, C/H)
+        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None)  # (B, H, T, C/H)
         # Swap the sequence length and the head dimension back and get rid of num_heads.
         attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
         return attention_out
