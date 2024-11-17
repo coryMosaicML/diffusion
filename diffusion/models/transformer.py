@@ -220,7 +220,7 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
         # Native torch attention
-        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None)  # (B, H, T, C/H)
+        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)  # (B, H, T, C/H)
         # Swap the sequence length and the head dimension back and get rid of num_heads.
         attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
         return attention_out
@@ -452,10 +452,6 @@ class DiffusionTransformer(nn.Module):
         y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
         y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
         y = y + y_position_embeddings  # (B, T1, C)
-        if input_mask is None:
-            mask = torch.ones(x.shape[0], x.shape[1], device=x.device)
-        else:
-            mask = input_mask
 
         # Embed the conditioning
         c = self.conditioning_embedding(conditioning)  # (B, T2, C)
@@ -464,27 +460,15 @@ class DiffusionTransformer(nn.Module):
                                                                          conditioning_coords)
         c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
         c = c + c_position_embeddings  # (B, T2, C)
-        # Concatenate the masks
-        if conditioning_mask is None:
-            conditioning_mask = torch.ones(conditioning.shape[0], conditioning.shape[1], device=conditioning.device)
-        mask = torch.cat([mask, conditioning_mask], dim=1)  # (B, T1 + T2)
+
         # Optionally add the register tokens
         if self.num_register_tokens > 0:
             repeated_register = self.register_tokens.repeat(c.shape[0], 1, 1)
             c = torch.cat([c, repeated_register], dim=1)
-            register_mask = torch.ones(c.shape[0], self.num_register_tokens, device=mask.device)
-            mask = torch.cat([mask, register_mask], dim=1)
-
-        # Expand the mask to the right shape
-        mask = mask.bool()
-        mask = mask.unsqueeze(-1) & mask.unsqueeze(1)  # (B, T1 + T2, T1 + T2)
-        identity = torch.eye(mask.shape[1], device=mask.device, dtype=mask.dtype).unsqueeze(0)
-        mask = mask | identity
-        mask = mask.unsqueeze(1)  # (B, 1, T1 + T2, T1 + T2)
 
         # Pass through the transformer blocks
         for block in self.transformer_blocks:
-            y, c = block(y, c, t, mask=mask)
+            y, c = block(y, c, t, mask=None)
         # Pass through the output layers to get the right number of elements
         y = self.final_norm(y, t)
         y = self.final_linear(y)
