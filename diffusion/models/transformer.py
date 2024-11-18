@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.profiler import record_function
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -99,39 +100,42 @@ class ScalarEmbedding(nn.Module):
     Args:
         num_features (int): The size of the output vector.
         sinusoidal_embedding_dim (int): The size of the intermediate sinusoidal embedding. Default: `256`.
+        max_period (int): The maximum period of the sinusoidal embedding. Default: `10000`.
 
     Returns:
         torch.Tensor: The embedded scalar
     """
 
-    def __init__(self, num_features: int, sinusoidal_embedding_dim: int = 256):
+    def __init__(self, num_features: int, sinusoidal_embedding_dim: int = 256, max_period: int = 10000):
         super().__init__()
         self.num_features = num_features
         self.sinusoidal_embedding_dim = sinusoidal_embedding_dim
+        self.max_period = max_period
         self.linear_1 = nn.Linear(self.sinusoidal_embedding_dim, self.num_features)
         self.linear_2 = nn.Linear(self.num_features, self.num_features)
         self.mlp = nn.Sequential(self.linear_1, nn.SiLU(), self.linear_2)
+        # Make the freqs
+        half_dim = self.sinusoidal_embedding_dim // 2
+        self.freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32) /
+                               half_dim)
 
-    @staticmethod
-    def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
+    def _apply(self, fn):
+        super(ScalarEmbedding, self)._apply(fn)
+        self.freqs = fn(self.freqs)
+        return self
+
+    def timestep_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
         """Create sinusoidal timestep embeddings.
 
         Args:
             timesteps (torch.Tensor): The timesteps to embed.
-            dim (int): The size of the output embedding.
-            max_period (int): The maximum period of the sinusoidal embedding. Default: `10000`.
         """
-        half = dim // 2
-        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) /
-                          half).to(device=timesteps.device)
-        args = timesteps[:, None].float() * freqs[None]
+        args = timesteps[:, None].float() * self.freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        sinusoidal_embedding = self.timestep_embedding(x, self.sinusoidal_embedding_dim)
+        sinusoidal_embedding = self.timestep_embedding(x)
         # Ensure embedding is the correct dtype
         sinusoidal_embedding = sinusoidal_embedding.to(next(self.parameters()).dtype)
         return self.mlp(sinusoidal_embedding)
@@ -315,22 +319,25 @@ class MMDiTBlock(nn.Module):
                 t: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         # Pre-attention for the two modalities
-        q1, k1, v1 = self.pre_attention_block_1(x1, t)
-        q2, k2, v2 = self.pre_attention_block_2(x2, t)
+        with record_function('Pre-attention'):
+            q1, k1, v1 = self.pre_attention_block_1(x1, t)
+            q2, k2, v2 = self.pre_attention_block_2(x2, t)
         # Concat q, k, v along the sequence dimension
         q = torch.cat([q1, q2], dim=1).contiguous()
         k = torch.cat([k1, k2], dim=1).contiguous()
         v = torch.cat([v1, v2], dim=1).contiguous()
         # Self-attention
-        v = self.attention(q, k, v, mask=mask)
+        with record_function('Attention'):
+            v = self.attention(q, k, v, mask=mask)
         # Split the attention output back into the two modalities
         seq_len_1, seq_len_2 = x1.size(1), x2.size(1)
         y1, y2 = v.split([seq_len_1, seq_len_2], dim=1)
         y1, y2 = y1.contiguous(), y2.contiguous()
         # Post-attention for the two modalities
-        y1 = self.post_attention_block_1(y1, x1, t)
-        if not self.is_last:
-            y2 = self.post_attention_block_2(y2, x2, t)
+        with record_function('Post attention'):
+            y1 = self.post_attention_block_1(y1, x1, t)
+            if not self.is_last:
+                y2 = self.post_attention_block_2(y2, x2, t)
         return y1, y2
 
 
@@ -449,33 +456,37 @@ class DiffusionTransformer(nn.Module):
             torch.Tensor: The output sequence of shape (B, T1, C1).
         """
         # Embed the timestep
-        t = self.timestep_embedding(t)
-        # Optionally add constant conditioning. This assumes it has been embedded already.
-        if constant_conditioning is not None:
-            t = t + constant_conditioning
-        # Embed the input
-        y = self.input_embedding(x)  # (B, T1, C)
-        # Get the input position embeddings and add them to the input
-        #y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
-        #y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
-        #y = y + y_position_embeddings  # (B, T1, C)
+        with record_function('Preprocessing'):
+            with record_function('Timestep embedding'):
+                t = self.timestep_embedding(t)
+                # Optionally add constant conditioning. This assumes it has been embedded already.
+                if constant_conditioning is not None:
+                    t = t + constant_conditioning
+            with record_function('Sequence embedding'):
+                # Embed the input
+                y = self.input_embedding(x)  # (B, T1, C)
+                # Get the input position embeddings and add them to the input
+                #y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
+                #y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
+                #y = y + y_position_embeddings  # (B, T1, C)
 
-        # Embed the conditioning
-        c = self.conditioning_embedding(conditioning)  # (B, T2, C)
-        # Get the conditioning position embeddings and add them to the conditioning
-        #c_position_embeddings = get_multidimensional_position_embeddings(self.conditioning_position_embedding,
-        #                                                                 conditioning_coords)
-        #c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
-        #c = c + c_position_embeddings  # (B, T2, C)
+                # Embed the conditioning
+                c = self.conditioning_embedding(conditioning)  # (B, T2, C)
+                # Get the conditioning position embeddings and add them to the conditioning
+                #c_position_embeddings = get_multidimensional_position_embeddings(self.conditioning_position_embedding,
+                #                                                                 conditioning_coords)
+                #c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
+                #c = c + c_position_embeddings  # (B, T2, C)
 
-        # Optionally add the register tokens
-        if self.num_register_tokens > 0:
-            repeated_register = self.register_tokens.repeat(c.shape[0], 1, 1)
-            c = torch.cat([c, repeated_register], dim=1)
+            # Optionally add the register tokens
+            if self.num_register_tokens > 0:
+                repeated_register = self.register_tokens.repeat(c.shape[0], 1, 1)
+                c = torch.cat([c, repeated_register], dim=1)
 
         # Pass through the transformer blocks
-        for block in self.transformer_blocks:
-            y, c = block(y, c, t, mask=None)
+        with record_function('Blocks forward'):
+            for block in self.transformer_blocks:
+                y, c = block(y, c, t, mask=None)
         # Pass through the output layers to get the right number of elements
         y = self.final_norm(y, t)
         y = self.final_linear(y)
