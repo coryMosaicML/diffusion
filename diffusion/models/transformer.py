@@ -17,28 +17,25 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
 
 
 def get_multidimensional_position_embeddings(position_embeddings: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
-    """Extracts position embeddings for a multidimensional sequence given by coordinates.
-
-    Position embeddings are shape (D, T, F). Coords are shape (B, S, D). Position embeddings should be
-    interpreted as D dimensional embeddings with F features each for a maximum of T timesteps.
-    Coordinates or `coords` is a batch of size B of sequences of length S with D dimensional integer
-    coordinates. For example, if D=2, then each of the B, S elements of the sequence would have a 2D
-    X,Y coordinate.
-
-    Args:
-        position_embeddings (torch.Tensor): Position embeddings of shape (D, T, F).
-        coords (torch.Tensor): Coordinates of shape (B, S, D).
-
-    Returns:
-        torch.Tensor: Sequenced embeddings of shape (B, S, F, D)
-    """
+    """Optimized version of the function to extract position embeddings for a multidimensional sequence."""
     B, S, D = coords.shape
-    F = position_embeddings.shape[2]
-    coords = coords.reshape(B * S, D)
-    sequenced_embeddings = [position_embeddings[d, coords[:, d]] for d in range(D)]
-    sequenced_embeddings = torch.stack(sequenced_embeddings, dim=-1)
-    sequenced_embeddings = sequenced_embeddings.view(B, S, F, D)
-    return sequenced_embeddings  # (B, S, F, D)
+    _, T, F = position_embeddings.shape
+
+    # Ensure coords are within the valid range
+    assert coords.max() < T, 'Coordinates exceed the max timestep in position_embeddings.'
+    assert coords.min() >= 0, 'Coordinates contain negative values.'
+
+    # Reshape coords for batched indexing
+    coords = coords.permute(2, 0, 1).contiguous()  # (D, B, S)
+    coords = coords.view(D, -1)  # (D, B * S)
+
+    # Gather embeddings for all dimensions simultaneously
+    sequenced_embeddings = position_embeddings[torch.arange(D).unsqueeze(-1), coords]  # (D, B * S, F)
+
+    # Reshape to match the desired output shape
+    sequenced_embeddings = sequenced_embeddings.permute(1, 2, 0).view(B, S, F, D)  # (B, S, F, D)
+
+    return sequenced_embeddings
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -177,22 +174,25 @@ class PreAttentionBlock(nn.Module):
         # Adaptive layernorm
         self.adaptive_layernorm = AdaptiveLayerNorm(self.num_features)
         # Linear layer to get q, k, and v
-        self.qkv = nn.Linear(self.num_features, 3 * self.num_features)
+        self.q_proj = nn.Linear(self.num_features, self.num_features)
+        self.k_proj = nn.Linear(self.num_features, self.num_features)
+        self.v_proj = nn.Linear(self.num_features, self.num_features)
         # QK layernorms. Original MMDiT used RMSNorm here.
         self.q_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
         self.k_norm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
-        # Initialize all biases to zero
-        nn.init.zeros_(self.qkv.bias)
-        # Init the standard deviation of the weights to 0.02 as is tradition
-        nn.init.normal_(self.qkv.weight, std=0.02)
+        for l in [self.q_proj, self.k_proj, self.v_proj]:
+            # Initialize all biases to zero
+            nn.init.zeros_(l.bias)
+            # Init the standard deviation of the weights to 0.02 as is tradition
+            nn.init.normal_(l.weight, std=0.02)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.adaptive_layernorm(x, t)
         # Calculate the query, key, and values all in one go
-        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         q = self.q_norm(q)
         k = self.k_norm(k)
-        return q.contiguous(), k.contiguous(), v.contiguous()
+        return q, k, v
 
 
 class SelfAttention(nn.Module):
@@ -207,22 +207,29 @@ class SelfAttention(nn.Module):
         super().__init__()
         self.num_features = num_features
         self.num_heads = num_heads
+        self.head_dim = num_features // num_heads
 
     def forward(self,
                 q: torch.Tensor,
                 k: torch.Tensor,
                 v: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Get the shape of the inputs
         B, T, C = v.size()
-        # Reshape the query, key, and values for multi-head attention
-        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
-        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
-        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
-        # Native torch attention
-        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)  # (B, H, T, C/H)
-        # Swap the sequence length and the head dimension back and get rid of num_heads.
-        attention_out = attention_out.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
+        H = self.num_heads
+        D = self.head_dim
+
+        # Reshape and permute to (B, H, T, D) in one step
+        def reshape_to_heads(x):
+            return x.reshape(B, T, H, D).permute(0, 2, 1, 3)
+
+        q = reshape_to_heads(q)  # Shape: (B, H, T, D)
+        k = reshape_to_heads(k)
+        v = reshape_to_heads(v)
+        # Apply scaled dot-product attention
+        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        # attention_out is (B, H, T, D)
+        # Permute back and reshape to (B, T, C)
+        attention_out = attention_out.permute(0, 2, 1, 3).reshape(B, T, C)
         return attention_out
 
 
@@ -380,14 +387,14 @@ class DiffusionTransformer(nn.Module):
         # Embedding layer for the input sequence
         input_position_embedding = torch.randn(self.input_dimension, self.input_max_sequence_length, self.num_features)
         input_position_embedding /= math.sqrt(self.num_features)
-        self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
+        #self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
         # Projection layer for the conditioning sequence
         self.conditioning_embedding = nn.Linear(self.conditioning_features, self.num_features)
         # Embedding layer for the conditioning sequence
         conditioning_position_embedding = torch.randn(self.conditioning_dimension,
                                                       self.conditioning_max_sequence_length, self.num_features)
         conditioning_position_embedding /= math.sqrt(self.num_features)
-        self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
+        #self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
         # Optional register tokens
         if self.num_register_tokens > 0:
             register_tokens = torch.randn(1, self.num_register_tokens, self.num_features) / math.sqrt(self.num_features)
@@ -449,17 +456,17 @@ class DiffusionTransformer(nn.Module):
         # Embed the input
         y = self.input_embedding(x)  # (B, T1, C)
         # Get the input position embeddings and add them to the input
-        y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
-        y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
-        y = y + y_position_embeddings  # (B, T1, C)
+        #y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
+        #y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
+        #y = y + y_position_embeddings  # (B, T1, C)
 
         # Embed the conditioning
         c = self.conditioning_embedding(conditioning)  # (B, T2, C)
         # Get the conditioning position embeddings and add them to the conditioning
-        c_position_embeddings = get_multidimensional_position_embeddings(self.conditioning_position_embedding,
-                                                                         conditioning_coords)
-        c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
-        c = c + c_position_embeddings  # (B, T2, C)
+        #c_position_embeddings = get_multidimensional_position_embeddings(self.conditioning_position_embedding,
+        #                                                                 conditioning_coords)
+        #c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
+        #c = c + c_position_embeddings  # (B, T2, C)
 
         # Optionally add the register tokens
         if self.num_register_tokens > 0:

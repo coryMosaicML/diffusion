@@ -50,7 +50,7 @@ def patchify(latents: torch.Tensor, patch_size: int) -> Tuple[torch.Tensor, torc
     patches = latents.reshape(B, C, num_H_patches, patch_size, num_W_patches, patch_size)
     patches = patches.permute(0, 2, 4, 1, 3, 5).reshape(B, -1, C * patch_size * patch_size)
     # Generate coordinates for each patch
-    coords = torch.tensor([(i, j) for i in range(num_H_patches) for j in range(num_W_patches)])
+    coords = torch.tensor([(i, j) for i in range(num_H_patches) for j in range(num_W_patches)], device=latents.device)
     coords = coords.unsqueeze(0).expand(B, -1, -1).reshape(B, -1, 2)
     return patches, coords
 
