@@ -18,24 +18,29 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
 
 
 def get_multidimensional_position_embeddings(position_embeddings: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
-    """Optimized version of the function to extract position embeddings for a multidimensional sequence."""
-    B, S, D = coords.shape
-    _, T, F = position_embeddings.shape
+    """Extract position embeddings for a multidimensional sequence.
 
-    # Ensure coords are within the valid range
-    assert coords.max() < T, 'Coordinates exceed the max timestep in position_embeddings.'
-    assert coords.min() >= 0, 'Coordinates contain negative values.'
+    Args:
+        position_embeddings (torch.Tensor): Precomputed position embeddings of shape [D, T, F],
+                                            where D is the number of dimensions, T is the number
+                                            of timesteps, and F is the embedding size.
+        coords (torch.Tensor): Coordinates of shape [B, S, D], where B is the batch size,
+                               S is the sequence length, and D is the number of dimensions.
 
-    # Reshape coords for batched indexing
-    coords = coords.permute(2, 0, 1).contiguous()  # (D, B, S)
-    coords = coords.view(D, -1)  # (D, B * S)
-
-    # Gather embeddings for all dimensions simultaneously
-    sequenced_embeddings = position_embeddings[torch.arange(D).unsqueeze(-1), coords]  # (D, B * S, F)
-
+    Returns:
+        torch.Tensor: Position embeddings of shape [B, S, F, D].
+    """
+    B, S, D = coords.shape  # Batch size, sequence length, dimensions
+    _, _, F = position_embeddings.shape  # Position embedding dimensions
+    # Prepare index tensors
+    # Repeat dims D times (broadcast to match coords)
+    dims = torch.arange(D, device=coords.device).view(D, 1).expand(D, B * S)  # (D, B * S)
+    # Flatten coords for batched indexing
+    coords = coords.permute(2, 0, 1).reshape(D, -1)  # (D, B * S)
+    # Gather embeddings
+    sequenced_embeddings = position_embeddings[dims, coords]  # (D, B * S, F)
     # Reshape to match the desired output shape
-    sequenced_embeddings = sequenced_embeddings.permute(1, 2, 0).view(B, S, F, D)  # (B, S, F, D)
-
+    sequenced_embeddings = sequenced_embeddings.permute(1, 2, 0).reshape(B, S, F, D)  # (B, S, F, D)
     return sequenced_embeddings
 
 
@@ -53,18 +58,23 @@ class AdaptiveLayerNorm(nn.Module):
         self.num_features = num_features
         # MLP for computing modulations.
         # Initialized to zero so modulation acts as identity at initialization.
-        self.adaLN_mlp_linear = nn.Linear(self.num_features, 2 * self.num_features, bias=True)
-        nn.init.zeros_(self.adaLN_mlp_linear.weight)
-        nn.init.zeros_(self.adaLN_mlp_linear.bias)
-        self.adaLN_mlp = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear)
+        self.adaLN_mlp_linear_shift = nn.Linear(self.num_features, self.num_features, bias=True)
+        self.adaLN_mlp_linear_scale = nn.Linear(self.num_features, self.num_features, bias=True)
+        nn.init.zeros_(self.adaLN_mlp_linear_shift.weight)
+        nn.init.zeros_(self.adaLN_mlp_linear_scale.weight)
+        nn.init.zeros_(self.adaLN_mlp_linear_shift.bias)
+        nn.init.zeros_(self.adaLN_mlp_linear_scale.bias)
+        self.adaLN_mlp_shift = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear_shift)
+        self.adaLN_mlp_scale = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear_scale)
         # LayerNorm
-        self.layernorm = nn.LayerNorm(self.num_features, elementwise_affine=True, eps=1e-6)
+        self.layernorm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         # Calculate the modulations
-        mods = self.adaLN_mlp(t).unsqueeze(1).chunk(2, dim=2)
+        shift = self.adaLN_mlp_linear_shift(t)
+        scale = self.adaLN_mlp_linear_scale(t)
         # Apply the modulations
-        return modulate(self.layernorm(x), mods[0], mods[1])
+        return modulate(self.layernorm(x), shift, scale)
 
 
 class ModulationLayer(nn.Module):
@@ -88,7 +98,7 @@ class ModulationLayer(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         # Calculate the modulations
-        mods = self.adaLN_mlp(t).unsqueeze(1)
+        mods = self.adaLN_mlp(t)
         return x * mods
 
 
@@ -394,14 +404,14 @@ class DiffusionTransformer(nn.Module):
         # Embedding layer for the input sequence
         input_position_embedding = torch.randn(self.input_dimension, self.input_max_sequence_length, self.num_features)
         input_position_embedding /= math.sqrt(self.num_features)
-        #self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
+        self.input_position_embedding = torch.nn.Parameter(input_position_embedding, requires_grad=True)
         # Projection layer for the conditioning sequence
         self.conditioning_embedding = nn.Linear(self.conditioning_features, self.num_features)
         # Embedding layer for the conditioning sequence
         conditioning_position_embedding = torch.randn(self.conditioning_dimension,
                                                       self.conditioning_max_sequence_length, self.num_features)
         conditioning_position_embedding /= math.sqrt(self.num_features)
-        #self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
+        self.conditioning_position_embedding = torch.nn.Parameter(conditioning_position_embedding, requires_grad=True)
         # Optional register tokens
         if self.num_register_tokens > 0:
             register_tokens = torch.randn(1, self.num_register_tokens, self.num_features) / math.sqrt(self.num_features)
@@ -462,21 +472,23 @@ class DiffusionTransformer(nn.Module):
                 # Optionally add constant conditioning. This assumes it has been embedded already.
                 if constant_conditioning is not None:
                     t = t + constant_conditioning
+                t = t.unsqueeze(1)
             with record_function('Sequence embedding'):
                 # Embed the input
                 y = self.input_embedding(x)  # (B, T1, C)
                 # Get the input position embeddings and add them to the input
-                #y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding, input_coords)
-                #y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
-                #y = y + y_position_embeddings  # (B, T1, C)
+                y_position_embeddings = get_multidimensional_position_embeddings(self.input_position_embedding,
+                                                                                 input_coords)
+                y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
+                y = y + y_position_embeddings  # (B, T1, C)
 
                 # Embed the conditioning
                 c = self.conditioning_embedding(conditioning)  # (B, T2, C)
                 # Get the conditioning position embeddings and add them to the conditioning
-                #c_position_embeddings = get_multidimensional_position_embeddings(self.conditioning_position_embedding,
-                #                                                                 conditioning_coords)
-                #c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
-                #c = c + c_position_embeddings  # (B, T2, C)
+                c_position_embeddings = get_multidimensional_position_embeddings(self.conditioning_position_embedding,
+                                                                                 conditioning_coords)
+                c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
+                c = c + c_position_embeddings  # (B, T2, C)
 
             # Optionally add the register tokens
             if self.num_register_tokens > 0:

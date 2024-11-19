@@ -50,8 +50,9 @@ def patchify(latents: torch.Tensor, patch_size: int) -> Tuple[torch.Tensor, torc
     patches = latents.reshape(B, C, num_H_patches, patch_size, num_W_patches, patch_size)
     patches = patches.permute(0, 2, 4, 1, 3, 5).reshape(B, -1, C * patch_size * patch_size)
     # Generate coordinates for each patch
-    coords = torch.tensor([(i, j) for i in range(num_H_patches) for j in range(num_W_patches)], device=latents.device)
-    coords = coords.unsqueeze(0).expand(B, -1, -1).reshape(B, -1, 2)
+    y_coords = torch.arange(num_H_patches, device=latents.device).repeat_interleave(num_W_patches)
+    x_coords = torch.arange(num_W_patches, device=latents.device).repeat(num_H_patches)
+    coords = torch.stack((y_coords, x_coords), dim=-1).unsqueeze(0).expand(B, -1, -1)
     return patches, coords
 
 
@@ -164,6 +165,7 @@ class ComposerTextToImageMMDiT(ComposerModel):
         # Only FSDP wrap models we are training
         self.model._fsdp_wrap = True
         self.autoencoder._fsdp_wrap = False
+        self.autoencoder = self.autoencoder.to(memory_format=torch.channels_last)
         self.text_encoder._fsdp_wrap = True
 
         # Param counts relevant for MFU computation
@@ -221,7 +223,9 @@ class ComposerTextToImageMMDiT(ComposerModel):
     def encode_image(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode an image tensor with the autoencoder and patchify the latents."""
         with torch.cuda.amp.autocast(enabled=False):
+            image = image.to(memory_format=torch.channels_last)
             latents = self.autoencoder.encode(image.half())['latent_dist'].sample().data
+            latents = latents.contiguous()
         # Scale and patchify the latents
         latents = (latents - self.latent_mean) / self.latent_std
         latent_patches, latent_coords = patchify(latents, self.patch_size)
