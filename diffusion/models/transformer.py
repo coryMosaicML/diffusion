@@ -18,30 +18,34 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
 
 
 def get_multidimensional_position_embeddings(position_embeddings: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
-    """Extract position embeddings for a multidimensional sequence.
+    """Extracts position embeddings for a multidimensional sequence given by coordinates.
+
+    Position embeddings are shape (D, T, F). Coords are shape (B, S, D). Position embeddings should be
+    interpreted as D dimensional embeddings with F features each for a maximum of T timesteps.
+    Coordinates or `coords` is a batch of size B of sequences of length S with D dimensional integer
+    coordinates. For example, if D=2, then each of the B, S elements of the sequence would have a 2D
+    X,Y coordinate.
 
     Args:
-        position_embeddings (torch.Tensor): Precomputed position embeddings of shape [D, T, F],
-                                            where D is the number of dimensions, T is the number
-                                            of timesteps, and F is the embedding size.
-        coords (torch.Tensor): Coordinates of shape [B, S, D], where B is the batch size,
-                               S is the sequence length, and D is the number of dimensions.
+        position_embeddings (torch.Tensor): Position embeddings of shape (D, T, F).
+        coords (torch.Tensor): Coordinates of shape (B, S, D).
 
     Returns:
-        torch.Tensor: Position embeddings of shape [B, S, F, D].
+        torch.Tensor: Sequenced embeddings of shape (B, S, F, D)
     """
-    B, S, D = coords.shape  # Batch size, sequence length, dimensions
-    _, _, F = position_embeddings.shape  # Position embedding dimensions
-    # Prepare index tensors
-    # Repeat dims D times (broadcast to match coords)
-    dims = torch.arange(D, device=coords.device).view(D, 1).expand(D, B * S)  # (D, B * S)
-    # Flatten coords for batched indexing
-    coords = coords.permute(2, 0, 1).reshape(D, -1)  # (D, B * S)
-    # Gather embeddings
-    sequenced_embeddings = position_embeddings[dims, coords]  # (D, B * S, F)
-    # Reshape to match the desired output shape
-    sequenced_embeddings = sequenced_embeddings.permute(1, 2, 0).reshape(B, S, F, D)  # (B, S, F, D)
-    return sequenced_embeddings
+    B = coords.shape[0]
+    F = position_embeddings.shape[-1]  # Position embedding dimensions
+    # Transpose coords to shape (D, B, S)
+    coords = coords.permute(2, 0, 1)  # (D, B, S)
+    # Expand position_embeddings to match the batch size
+    position_embeddings = position_embeddings.unsqueeze(1).expand(-1, B, -1, -1)  # (D, B, T, F)
+    # Prepare indices for torch.gather
+    coords = coords.unsqueeze(-1).expand(-1, -1, -1, F)  # (D, B, S, F)
+    # Use torch.gather to collect embeddings
+    embeddings = torch.gather(position_embeddings, 2, coords)  # (D, B, S, F)
+    # Rearrange embeddings to the desired output shape
+    embeddings = embeddings.permute(1, 2, 3, 0)  # (B, S, F, D)
+    return embeddings
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -333,22 +337,49 @@ class MMDiTBlock(nn.Module):
             q1, k1, v1 = self.pre_attention_block_1(x1, t)
             q2, k2, v2 = self.pre_attention_block_2(x2, t)
         # Concat q, k, v along the sequence dimension
-        q = torch.cat([q1, q2], dim=1).contiguous()
-        k = torch.cat([k1, k2], dim=1).contiguous()
-        v = torch.cat([v1, v2], dim=1).contiguous()
+        q = torch.cat([q1, q2], dim=1)
+        k = torch.cat([k1, k2], dim=1)
+        v = torch.cat([v1, v2], dim=1)
         # Self-attention
         with record_function('Attention'):
             v = self.attention(q, k, v, mask=mask)
         # Split the attention output back into the two modalities
         seq_len_1, seq_len_2 = x1.size(1), x2.size(1)
-        y1, y2 = v.split([seq_len_1, seq_len_2], dim=1)
-        y1, y2 = y1.contiguous(), y2.contiguous()
+        y1, y2 = v[:, :seq_len_1], v[:, seq_len_1:seq_len_1 + seq_len_2]
         # Post-attention for the two modalities
         with record_function('Post attention'):
             y1 = self.post_attention_block_1(y1, x1, t)
             if not self.is_last:
                 y2 = self.post_attention_block_2(y2, x2, t)
         return y1, y2
+
+
+class MMDiTGroup(nn.Module):
+    """A group of MMDiT blocks, for convenience.
+
+    Args:
+        num_blocks (int): Number of blocks in the group
+        num_features (int): Number of input features.
+        num_heads (int): Number of attention heads.
+        expansion_factor (int): Expansion factor for the MLP. Default: `4`.
+        is_last (bool): Whether this is the last block in the network. Default: `False`.
+    """
+
+    def __init__(self, num_blocks, num_features, num_heads, expansion_factor, is_last=False):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            MMDiTBlock(num_features, num_heads, expansion_factor, is_last=(is_last and i == num_blocks - 1))
+            for i in range(num_blocks)
+        ])
+
+    def forward(self,
+                x1: torch.Tensor,
+                x2: torch.Tensor,
+                t: torch.Tensor,
+                mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        for block in self.blocks:
+            x1, x2 = block(x1, x2, t, mask=mask)
+        return x1, x2
 
 
 class DiffusionTransformer(nn.Module):
@@ -368,6 +399,7 @@ class DiffusionTransformer(nn.Module):
         conditioning_dimension (int): Dimension of the conditioning sequence. Default: `1`.
         expansion_factor (int): Expansion factor for the MLPs. Default: `4`.
         num_register_tokens (int): Number of register tokens to use. Default: `0`.
+        block_group_size (int): Size of transformer block groups. Default: `4`.
     """
 
     def __init__(self,
@@ -381,13 +413,15 @@ class DiffusionTransformer(nn.Module):
                  conditioning_max_sequence_length: int = 77,
                  conditioning_dimension: int = 1,
                  expansion_factor: int = 4,
-                 num_register_tokens: int = 0):
+                 num_register_tokens: int = 0,
+                 block_group_size: int = 4):
         super().__init__()
         # Params for the network architecture
         self.num_features = num_features
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.expansion_factor = expansion_factor
+        self.block_group_size = block_group_size
         # Params for input embeddings
         self.input_features = input_features
         self.input_dimension = input_dimension
@@ -416,14 +450,22 @@ class DiffusionTransformer(nn.Module):
         if self.num_register_tokens > 0:
             register_tokens = torch.randn(1, self.num_register_tokens, self.num_features) / math.sqrt(self.num_features)
             self.register_tokens = torch.nn.Parameter(register_tokens, requires_grad=True)
+
         # Transformer blocks
-        self.transformer_blocks = nn.ModuleList([
-            MMDiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
-            for _ in range(self.num_layers - 1)
+        assert self.num_layers % self.block_group_size == 0, 'num_layers must be divisible by block_group_size.'
+        num_groups = self.num_layers // self.block_group_size
+        # Transformer groups
+        self.transformer_groups = nn.ModuleList([
+            MMDiTGroup(self.block_group_size, self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
+            for _ in range(num_groups - 1)
         ])
         # Turn off post attn layers for conditioning sequence in final block
-        self.transformer_blocks.append(
-            MMDiTBlock(self.num_features, self.num_heads, expansion_factor=self.expansion_factor, is_last=True))
+        self.transformer_groups.append(
+            MMDiTGroup(self.block_group_size,
+                       self.num_features,
+                       self.num_heads,
+                       expansion_factor=self.expansion_factor,
+                       is_last=True))
         # Output projection layer
         self.final_norm = AdaptiveLayerNorm(self.num_features)
         self.final_linear = nn.Linear(self.num_features, self.input_features)
@@ -432,12 +474,12 @@ class DiffusionTransformer(nn.Module):
         nn.init.zeros_(self.final_linear.bias)
 
     def fsdp_wrap_fn(self, module: nn.Module) -> bool:
-        if isinstance(module, MMDiTBlock):
+        if isinstance(module, MMDiTGroup):
             return True
         return False
 
     def activation_checkpointing_fn(self, module: nn.Module) -> bool:
-        if isinstance(module, MMDiTBlock):
+        if isinstance(module, MMDiTGroup):
             return True
         return False
 
@@ -481,7 +523,6 @@ class DiffusionTransformer(nn.Module):
                                                                                  input_coords)
                 y_position_embeddings = y_position_embeddings.sum(dim=-1)  # (B, T1, C)
                 y = y + y_position_embeddings  # (B, T1, C)
-
                 # Embed the conditioning
                 c = self.conditioning_embedding(conditioning)  # (B, T2, C)
                 # Get the conditioning position embeddings and add them to the conditioning
@@ -489,7 +530,6 @@ class DiffusionTransformer(nn.Module):
                                                                                  conditioning_coords)
                 c_position_embeddings = c_position_embeddings.sum(dim=-1)  # (B, T2, C)
                 c = c + c_position_embeddings  # (B, T2, C)
-
             # Optionally add the register tokens
             if self.num_register_tokens > 0:
                 repeated_register = self.register_tokens.repeat(c.shape[0], 1, 1)
@@ -497,7 +537,7 @@ class DiffusionTransformer(nn.Module):
 
         # Pass through the transformer blocks
         with record_function('Blocks forward'):
-            for block in self.transformer_blocks:
+            for block in self.transformer_groups:
                 y, c = block(y, c, t, mask=None)
         # Pass through the output layers to get the right number of elements
         y = self.final_norm(y, t)

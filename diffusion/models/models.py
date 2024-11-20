@@ -1023,6 +1023,7 @@ def precomputed_text_latents_to_image_transformer(
     conditioning_max_sequence_length: int = 512 + 77,
     num_register_tokens: int = 0,
     patch_size: int = 2,
+    block_group_size: int = 4,
     latent_mean: Union[float, Tuple, str] = 0.0,
     latent_std: Union[float, Tuple, str] = 7.67754318618,
     timestep_mean: float = 0.0,
@@ -1055,6 +1056,7 @@ def precomputed_text_latents_to_image_transformer(
         conditioning_max_sequence_length (int): Maximum sequence length for the conditioning transformer. Default: `77`.
         num_register_tokens (int): Number of additional register tokens to use. Default: `0`.
         patch_size (int): Patch size for the transformer. Default: `2`.
+        block_group_size (int): Size of transformer block groups. Default: `4`.
         latent_mean (float, Tuple, str): The mean of the autoencoder latents. Either a float for a single value,
             a tuple of means, or or `'latent_statistics'` to try to use the value from the autoencoder
             checkpoint. Defaults to `0.0`.
@@ -1119,7 +1121,8 @@ def precomputed_text_latents_to_image_transformer(
                                        conditioning_max_sequence_length=conditioning_max_sequence_length,
                                        conditioning_dimension=1,
                                        expansion_factor=4,
-                                       num_register_tokens=num_register_tokens)
+                                       num_register_tokens=num_register_tokens,
+                                       block_group_size=block_group_size)
 
     # Optionally load the tokenizers and text encoders
     t5_tokenizer, t5_encoder, clip_tokenizer, clip_encoder = None, None, None, None

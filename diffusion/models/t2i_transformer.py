@@ -163,9 +163,8 @@ class ComposerTextToImageMMDiT(ComposerModel):
         self.text_encoder = self.text_encoder.half()
 
         # Only FSDP wrap models we are training
-        self.model._fsdp_wrap = True
+        self.model._fsdp_wrap = False
         self.autoencoder._fsdp_wrap = False
-        self.autoencoder = self.autoencoder.to(memory_format=torch.channels_last)
         self.text_encoder._fsdp_wrap = True
 
         # Param counts relevant for MFU computation
@@ -222,10 +221,8 @@ class ComposerTextToImageMMDiT(ComposerModel):
 
     def encode_image(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode an image tensor with the autoencoder and patchify the latents."""
-        with torch.cuda.amp.autocast(enabled=False):
-            image = image.to(memory_format=torch.channels_last)
+        with torch.amp.autocast('cuda', enabled=False):
             latents = self.autoencoder.encode(image.half())['latent_dist'].sample().data
-            latents = latents.contiguous()
         # Scale and patchify the latents
         latents = (latents - self.latent_mean) / self.latent_std
         latent_patches, latent_coords = patchify(latents, self.patch_size)
@@ -629,7 +626,7 @@ class ComposerPrecomputedTextLatentsToImageMMDiT(ComposerModel):
 
     def encode_image(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode an image tensor with the autoencoder and patchify the latents."""
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             latents = self.autoencoder.encode(image.half())['latent_dist'].sample().data
         # Scale and patchify the latents
         latents = (latents - self.latent_mean) / self.latent_std
