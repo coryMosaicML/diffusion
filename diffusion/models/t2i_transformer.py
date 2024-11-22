@@ -624,6 +624,7 @@ class ComposerPrecomputedTextLatentsToImageMMDiT(ComposerModel):
         attention_flops = 4 * self.model.num_layers * seq_len**2 * self.model.num_features * batch_size
         return 3 * param_flops + 3 * attention_flops
 
+    @torch.no_grad()
     def encode_image(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode an image tensor with the autoencoder and patchify the latents."""
         with torch.amp.autocast('cuda', enabled=False):
@@ -742,7 +743,7 @@ class ComposerPrecomputedTextLatentsToImageMMDiT(ComposerModel):
 
         # Diffusion forward process
         noised_inputs, targets, timesteps = self.diffusion_forward_process(latent_patches)
-        # Forward through the model
+        # Forward through the modeld
         model_out = self.model(noised_inputs,
                                latent_coords,
                                timesteps,

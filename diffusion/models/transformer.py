@@ -9,12 +9,14 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.profiler import record_function
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Modulate the input with the shift and scale."""
-    return x * (1.0 + scale) + shift
+    """Modulate the input with the shift and scale using in-place operations."""
+    x.mul_(1.0 + scale).add_(shift)
+    return x
 
 
 def get_multidimensional_position_embeddings(position_embeddings: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
@@ -73,6 +75,7 @@ class AdaptiveLayerNorm(nn.Module):
         # LayerNorm
         self.layernorm = nn.LayerNorm(self.num_features, elementwise_affine=False, eps=1e-6)
 
+    @torch.compile()
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         # Calculate the modulations
         shift = self.adaLN_mlp_linear_shift(t)
@@ -100,10 +103,12 @@ class ModulationLayer(nn.Module):
         nn.init.zeros_(self.adaLN_mlp_linear.bias)
         self.adaLN_mlp = nn.Sequential(nn.SiLU(), self.adaLN_mlp_linear)
 
+    @torch.compile()
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         # Calculate the modulations
         mods = self.adaLN_mlp(t)
-        return x * mods
+        x.mul_(mods)
+        return x
 
 
 class ScalarEmbedding(nn.Module):
@@ -148,6 +153,7 @@ class ScalarEmbedding(nn.Module):
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         return embedding
 
+    @torch.compile()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         sinusoidal_embedding = self.timestep_embedding(x)
         # Ensure embedding is the correct dtype
@@ -173,6 +179,7 @@ class VectorEmbedding(nn.Module):
         self.linear_2 = nn.Linear(self.num_features, self.num_features)
         self.mlp = nn.Sequential(self.linear_1, nn.SiLU(), self.linear_2)
 
+    @torch.compile()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
 
@@ -204,51 +211,66 @@ class PreAttentionBlock(nn.Module):
             # Init the standard deviation of the weights to 0.02 as is tradition
             nn.init.normal_(l.weight, std=0.02)
 
+    @torch.compile()
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.adaptive_layernorm(x, t)
         # Calculate the query, key, and values all in one go
-        q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q, k, v = self.q_norm(self.q_proj(x)), self.k_norm(self.k_proj(x)), self.v_proj(x)
         return q, k, v
 
 
 class SelfAttention(nn.Module):
-    """Standard multihead self attention layer that supports masking.
+    """Multi-head self-attention layer with selectable attention implementations.
 
     Args:
         num_features (int): Number of input features.
         num_heads (int): Number of attention heads.
+        attn_impl (str): Attention implementation ('flash', 'mem_efficient', 'math'). Default: 'flash'.
     """
 
-    def __init__(self, num_features: int, num_heads: int):
+    def __init__(self, num_features: int, num_heads: int, attn_impl: str = 'flash'):
         super().__init__()
         self.num_features = num_features
         self.num_heads = num_heads
         self.head_dim = num_features // num_heads
+        assert self.num_features % self.num_heads == 0, 'num_features must be divisible by num_heads'
+        assert attn_impl in ('flash', 'mem_efficient',
+                             'math'), ("attn_impl must be 'flash', 'mem_efficient', or 'math'")
+        self.attn_impl = attn_impl
 
+    @torch.compile()
     def forward(self,
                 q: torch.Tensor,
                 k: torch.Tensor,
                 v: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        B, T, C = v.size()
+        B, T, C = q.size()
         H = self.num_heads
         D = self.head_dim
 
-        # Reshape and permute to (B, H, T, D) in one step
-        def reshape_to_heads(x):
-            return x.reshape(B, T, H, D).permute(0, 2, 1, 3)
+        # Reshape q, k, v for multi-head attention
+        q = q.view(B, T, H, D).transpose(1, 2)  # (B, H, T, D)
+        k = k.view(B, T, H, D).transpose(1, 2)  # (B, H, T, D)
+        v = v.view(B, T, H, D).transpose(1, 2)  # (B, H, T, D)
 
-        q = reshape_to_heads(q)  # Shape: (B, H, T, D)
-        k = reshape_to_heads(k)
-        v = reshape_to_heads(v)
-        # Apply scaled dot-product attention
-        attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        # attention_out is (B, H, T, D)
-        # Permute back and reshape to (B, T, C)
-        attention_out = attention_out.permute(0, 2, 1, 3).reshape(B, T, C)
+        # Attention with selectable implementation
+        with sdpa_kernel(self._get_sdp_backend()):
+            attention_out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+        # Reshape back to (B, T, C)
+        attention_out = attention_out.transpose(1, 2).reshape(B, T, C)
         return attention_out
+
+    def _get_sdp_backend(self):
+        if self.attn_impl == 'flash':
+            return SDPBackend.FLASH_ATTENTION
+        elif self.attn_impl == 'mem_efficient':
+            return SDPBackend.EFFICIENT_ATTENTION
+        elif self.attn_impl == 'math':
+            return SDPBackend.MATH
+        else:
+            # Default to math
+            return SDPBackend.MATH
 
 
 class PostAttentionBlock(nn.Module):
@@ -283,19 +305,51 @@ class PostAttentionBlock(nn.Module):
         # Output modulation
         self.modulate_output = ModulationLayer(self.num_features)
 
+    @torch.compile()
     def forward(self, v: torch.Tensor, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Forward takes v from self attention and the original sequence x with scalar conditioning t."""
         # Postprocess v with linear + gating modulation
-        y = self.modulate_v(self.linear_v(v), t)
-        y = x + y
+        y = self.modulate_v(self.linear_v(v), t) + x
         # Adaptive layernorm
-        y = self.output_norm(y, t)
-        # Output MLP
-        y = self.output_mlp(y)
+        y = self.output_mlp(self.output_norm(y, t))
         # Gating modulation for the output
-        y = self.modulate_output(y, t)
-        y = x + y
+        y = self.modulate_output(y, t) + x
         return y
+
+
+class DiTBlock(nn.Module):
+    """Transformer block that supports masking, and adaptive norms.
+
+    Args:
+        num_features (int): Number of input features.
+        num_heads (int): Number of attention heads.
+        expansion_factor (int): Expansion factor for the MLP. Default: `4`.
+    """
+
+    def __init__(self, num_features: int, num_heads: int, expansion_factor: int = 4, is_last: bool = False):
+        super().__init__()
+        self.num_features = num_features
+        self.num_heads = num_heads
+        self.expansion_factor = expansion_factor
+        # Pre-attention block
+        self.pre_attention_block = PreAttentionBlock(self.num_features)
+        # Self-attention
+        self.attention = SelfAttention(self.num_features, self.num_heads)
+        # Post-attention block
+        self.post_attention_block = PostAttentionBlock(self.num_features, self.expansion_factor)
+
+    @torch.compile()
+    def forward(self, x: torch.Tensor, t: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Pre-attention
+        with record_function('Pre-attention'):
+            q, k, v = self.pre_attention_block(x, t)
+        # Self-attention
+        with record_function('Attention'):
+            v = self.attention(q, k, v, mask=mask)
+        # Post-attention
+        with record_function('Post attention'):
+            v = self.post_attention_block(v, x, t)
+        return v
 
 
 class MMDiTBlock(nn.Module):
@@ -327,6 +381,7 @@ class MMDiTBlock(nn.Module):
         if not self.is_last:
             self.post_attention_block_2 = PostAttentionBlock(self.num_features, self.expansion_factor)
 
+    @torch.compile()
     def forward(self,
                 x1: torch.Tensor,
                 x2: torch.Tensor,
@@ -354,6 +409,28 @@ class MMDiTBlock(nn.Module):
         return y1, y2
 
 
+class DiTGroup(nn.Module):
+    """A group of DiT blocks, for convenience.
+
+    Args:
+        num_blocks (int): Number of blocks in the group
+        num_features (int): Number of input features.
+        num_heads (int): Number of attention heads.
+        expansion_factor (int): Expansion factor for the MLP. Default: `4`.
+        is_last (bool): Whether this is the last block in the network. Not used. Default: `False`.
+    """
+
+    def __init__(self, num_blocks, num_features, num_heads, expansion_factor, is_last=False):
+        super().__init__()
+        self.blocks = nn.ModuleList([DiTBlock(num_features, num_heads, expansion_factor) for _ in range(num_blocks)])
+
+    @torch.compile()
+    def forward(self, x: torch.Tensor, t: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x, t, mask=mask)
+        return x
+
+
 class MMDiTGroup(nn.Module):
     """A group of MMDiT blocks, for convenience.
 
@@ -372,6 +449,7 @@ class MMDiTGroup(nn.Module):
             for i in range(num_blocks)
         ])
 
+    @torch.compile()
     def forward(self,
                 x1: torch.Tensor,
                 x2: torch.Tensor,
@@ -414,7 +492,8 @@ class DiffusionTransformer(nn.Module):
                  conditioning_dimension: int = 1,
                  expansion_factor: int = 4,
                  num_register_tokens: int = 0,
-                 block_group_size: int = 4):
+                 block_group_size: int = 4,
+                 use_dit: bool = False):
         super().__init__()
         # Params for the network architecture
         self.num_features = num_features
@@ -422,6 +501,7 @@ class DiffusionTransformer(nn.Module):
         self.num_layers = num_layers
         self.expansion_factor = expansion_factor
         self.block_group_size = block_group_size
+        self.use_dit = use_dit
         # Params for input embeddings
         self.input_features = input_features
         self.input_dimension = input_dimension
@@ -455,17 +535,27 @@ class DiffusionTransformer(nn.Module):
         assert self.num_layers % self.block_group_size == 0, 'num_layers must be divisible by block_group_size.'
         num_groups = self.num_layers // self.block_group_size
         # Transformer groups
-        self.transformer_groups = nn.ModuleList([
-            MMDiTGroup(self.block_group_size, self.num_features, self.num_heads, expansion_factor=self.expansion_factor)
-            for _ in range(num_groups - 1)
-        ])
-        # Turn off post attn layers for conditioning sequence in final block
-        self.transformer_groups.append(
-            MMDiTGroup(self.block_group_size,
-                       self.num_features,
-                       self.num_heads,
-                       expansion_factor=self.expansion_factor,
-                       is_last=True))
+        if self.use_dit:
+            self.transformer_groups = nn.ModuleList([
+                DiTGroup(self.block_group_size,
+                         self.num_features,
+                         self.num_heads,
+                         expansion_factor=self.expansion_factor) for _ in range(num_groups)
+            ])
+        else:
+            self.transformer_groups = nn.ModuleList([
+                MMDiTGroup(self.block_group_size,
+                           self.num_features,
+                           self.num_heads,
+                           expansion_factor=self.expansion_factor) for _ in range(num_groups - 1)
+            ])
+            # Turn off post attn layers for conditioning sequence in final block
+            self.transformer_groups.append(
+                MMDiTGroup(self.block_group_size,
+                           self.num_features,
+                           self.num_heads,
+                           expansion_factor=self.expansion_factor,
+                           is_last=True))
         # Output projection layer
         self.final_norm = AdaptiveLayerNorm(self.num_features)
         self.final_linear = nn.Linear(self.num_features, self.input_features)
@@ -476,13 +566,18 @@ class DiffusionTransformer(nn.Module):
     def fsdp_wrap_fn(self, module: nn.Module) -> bool:
         if isinstance(module, MMDiTGroup):
             return True
+        if isinstance(module, DiTGroup):
+            return True
         return False
 
     def activation_checkpointing_fn(self, module: nn.Module) -> bool:
         if isinstance(module, MMDiTGroup):
             return True
+        if isinstance(module, DiTGroup):
+            return True
         return False
 
+    @torch.compile()
     def forward(self,
                 x: torch.Tensor,
                 input_coords: torch.Tensor,
@@ -537,8 +632,16 @@ class DiffusionTransformer(nn.Module):
 
         # Pass through the transformer blocks
         with record_function('Blocks forward'):
-            for block in self.transformer_groups:
-                y, c = block(y, c, t, mask=None)
+            if self.use_dit:
+                img_len = y.size(1)
+                y = torch.cat([y, c], dim=1)
+                for block in self.transformer_groups:
+                    y = block(y, t, mask=None)
+                # Chop off the conditioning
+                y = y[:, :img_len]
+            else:
+                for block in self.transformer_groups:
+                    y, c = block(y, c, t, mask=None)
         # Pass through the output layers to get the right number of elements
         y = self.final_norm(y, t)
         y = self.final_linear(y)

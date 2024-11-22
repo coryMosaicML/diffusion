@@ -21,7 +21,12 @@ class SyntheticImageCaptionLatentsDataset(Dataset):
         t5_dim (int): Dimension of the synthetic T5 embeddings. Default: ``4096``.
     """
 
-    def __init__(self, image_size: int = 512, clip_length: int = 77, clip_dim: int = 768, t5_length: int = 512, t5_dim: int = 4096):
+    def __init__(self,
+                 image_size: int = 512,
+                 clip_length: int = 77,
+                 clip_dim: int = 768,
+                 t5_length: int = 512,
+                 t5_dim: int = 4096):
 
         super().__init__()
         self.image_size = image_size
@@ -70,13 +75,11 @@ def build_synthetic_image_caption_latents_dataloader(
     if dataloader_kwargs is None:
         dataloader_kwargs = {}
 
-    dataset = SyntheticImageCaptionLatentsDataset(
-        image_size=image_size,
-        clip_length=clip_length,
-        clip_dim=clip_dim,
-        t5_length=t5_length,
-        t5_dim=t5_dim
-    )
+    dataset = SyntheticImageCaptionLatentsDataset(image_size=image_size,
+                                                  clip_length=clip_length,
+                                                  clip_dim=clip_dim,
+                                                  t5_length=t5_length,
+                                                  t5_dim=t5_dim)
 
     dataloader = DataLoader(
         dataset=dataset,
