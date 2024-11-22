@@ -1036,6 +1036,7 @@ def precomputed_text_latents_to_image_transformer(
     clip_mask_key: str = 'CLIP_ATTENTION_MASK',
     clip_pooled_key: str = 'CLIP_POOLED',
     pretrained: bool = False,
+    use_dit: bool = False,
 ):
     """Text to image transformer training setup.
 
@@ -1073,6 +1074,7 @@ def precomputed_text_latents_to_image_transformer(
         clip_mask_key (str): The key to use for the CLIP attention mask in the precomputed latents. Default: `'CLIP_ATTENTION_MASK'`.
         clip_pooled_key (str): The key to use for the CLIP pooled in the precomputed latents. Default: `'CLIP_POOLED'`.
         pretrained (bool): Whether to load pretrained weights. Not used. Defaults to False.
+        use_dit (bool): Whether or not to use DiT layers instead of MMDiT layers. Defaults to False.
     """
     latent_mean, latent_std = _parse_latent_statistics(latent_mean), _parse_latent_statistics(latent_std)
 
@@ -1122,7 +1124,8 @@ def precomputed_text_latents_to_image_transformer(
                                        conditioning_dimension=1,
                                        expansion_factor=4,
                                        num_register_tokens=num_register_tokens,
-                                       block_group_size=block_group_size)
+                                       block_group_size=block_group_size,
+                                       use_dit=use_dit)
 
     # Optionally load the tokenizers and text encoders
     t5_tokenizer, t5_encoder, clip_tokenizer, clip_encoder = None, None, None, None
